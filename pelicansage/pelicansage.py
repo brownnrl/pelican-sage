@@ -40,9 +40,16 @@ class SageDirective(Directive):
         if 'method' in self.options:
             method_argument = self.options['method']
 
+        code = """
+print 1 + 1
+import matplotlib.pyplot as plt
+plt.plot([1,2,3,4])
+plt.ylabel('some numbers')
+plt.show()
+"""
         url_1 = 'https://aleph.sagemath.org/service'
         data = urllib.urlencode({"accepted_tos":"true",
-                                 "code": "1+1"})
+                                 "code": code})
 
         req = urllib2.Request(url_1, data)
         rsp = urllib2.urlopen(req)
