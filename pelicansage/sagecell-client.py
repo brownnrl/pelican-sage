@@ -11,6 +11,12 @@ import urllib.request
 import shutil
 from uuid import uuid4
 
+def clean_uuid():
+    uid = str(uuid4()).replace('-','')
+    replacements = [(str(i), chr(97+i)) for i in range(10)]
+    table = ''.maketrans(dict(replacements))
+    return uid.translate(table)
+
 class SageCell(object):
     def __init__(self, url, timeout=10):
 
@@ -28,11 +34,12 @@ class SageCell(object):
 
         self._running = False
 
-    def _begin_requests(self):
-
+    def execute_request(self, code):
+        # zero out our list of messages, in case this is not the first request
         if not self._running:
             resp = urllib.request.urlopen(self.req).read().decode('utf8')
             response = json.loads(resp)
+            self.session = str(uuid4())
 
             # RESPONSE: {"id": "ce20fada-f757-45e5-92fa-05e952dd9c87", "ws_url": "ws://localhost:8888/"}
             # construct the iopub and shell websocket channel urls from that
@@ -42,23 +49,24 @@ class SageCell(object):
             self._shell = websocket.create_connection(self.kernel_url+'shell')
             self._iopub = websocket.create_connection(self.kernel_url+'iopub')
 
-            # initialize our list of messages
-            self.shell_messages = []
-            self.iopub_messages = []
+            self._running = True
 
-            # We use threads so that we can simultaneously get the messages on both channels.
-            self.threads = [threading.Thread(target=self._get_iopub_messages), 
-                            threading.Thread(target=self._get_shell_messages)]
-            for t in self.threads:
-                t.start()
+            # we also require an interact to keep the kernel alive
+            code = "@interact\ndef %s():\n    pass\n%s" % (clean_uuid(),code)
 
-    def execute_request(self, code):
-        # zero out our list of messages, in case this is not the first request
-        self._begin_requests()
+
+        self.shell_messages = []
+        self.iopub_messages = []
 
         # Send the JSON execute_request message string down the shell channel
         msg = self._make_execute_request(code)
         self._shell.send(msg)
+            
+        # We use threads so that we can simultaneously get the messages on both channels.
+        self.threads = [threading.Thread(target=self._get_iopub_messages), 
+                        threading.Thread(target=self._get_shell_messages)]
+        for t in self.threads:
+            t.start()
 
         # Wait until we get both a kernel status idle message and an execute_reply message
         for t in self.threads:
@@ -67,7 +75,7 @@ class SageCell(object):
         return {'kernel_url': self.kernel_url, 'shell': self.shell_messages, 'iopub': self.iopub_messages}
 
     def _get_shell_messages(self):
-        while True:
+        while True and self._running:
             msg = json.loads(self._shell.recv())
             self.shell_messages.append(msg)
             # an execute_reply message signifies the computation is done
@@ -75,7 +83,7 @@ class SageCell(object):
                 break
 
     def _get_iopub_messages(self):
-        while True:
+        while True and self._running:
             msg = json.loads(self._iopub.recv())
             self.iopub_messages.append(msg)
             # the kernel status idle message signifies the kernel is done
@@ -83,9 +91,6 @@ class SageCell(object):
                 break
 
     def _make_execute_request(self, code):
-        if not self._running:
-            self.session = str(uuid4())
-
         message = str(uuid4())
         self._message_ids.append(message)
 
@@ -139,6 +144,7 @@ def main():
     result = a.execute_request("""
 from pylab import *
 
+x = 'hello world from x'
 t = arange(0.0, 2.0, 0.01)
 s = sin(2*pi*t)
 plot(t, s)
@@ -153,6 +159,12 @@ show()
 """)
     pprint.pprint(result)
     grab_images(result)
+    result = a.execute_request("""
+print "hello world"
+print x
+""")
+    print("\n\nSECOND RESULT\n\n")
+    pprint.pprint(result)
     return result 
 
 if __name__ == "__main__":
