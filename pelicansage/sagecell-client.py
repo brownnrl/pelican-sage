@@ -11,12 +11,6 @@ import urllib.request
 import shutil
 from uuid import uuid4
 
-def clean_uuid():
-    uid = str(uuid4()).replace('-','')
-    replacements = [(str(i), chr(97+i)) for i in range(10)]
-    table = ''.maketrans(dict(replacements))
-    return uid.translate(table)
-
 class SageCell(object):
     def __init__(self, url, timeout=10):
 
@@ -52,7 +46,7 @@ class SageCell(object):
             self._running = True
 
             # we also require an interact to keep the kernel alive
-            code = "@interact\ndef %s():\n    pass\n%s" % (clean_uuid(),code)
+            code = "interact(lambda : None)\n%s" % (code,)
 
 
         self.shell_messages = []
