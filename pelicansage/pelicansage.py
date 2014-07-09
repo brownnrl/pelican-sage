@@ -2,8 +2,12 @@ from __future__ import unicode_literals, print_function
 
 from docutils import nodes
 from docutils.parsers.rst import directives, Directive
+from .sagecell import SageCell
 
-import urllib, urllib2, cookielib
+import pprint
+
+def _define_choice(choice1, choice2):
+    return lambda arg : directives.choice(arg, (choice1, choice2))
 
 class SageDirective(Directive):
     """ Embed a sage cell server into posts.
@@ -16,48 +20,28 @@ class SageDirective(Directive):
     
     """
 
-
     required_arguments = 0
-    optional_arguments = 1
+    optional_arguments = 2
     final_argument_whitespace = False
     has_content = True
 
-    _cookie_jar = cookielib.CookieJar()
-    _opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(_cookie_jar))
-    urllib2.install_opener(_opener)
-
     def __init__(self, *args, **kwargs):
         super(SageDirective, self).__init__(*args, **kwargs)
+        self._cell = SageCell('http://sagecell.sagemath.org/')
 
-    def method(argument):
-        """Conversion function for the "method" option."""
-        return directives.choice(argument, ('static', 'dynamic'))
     
-    option_spec = { 'method' : method }
+    option_spec = { 'method' : _define_choice('static', 'dynamic'),
+                    'show_code' : _define_choice('true','false')}
 
     def run(self):
         method_argument = 'static'
         if 'method' in self.options:
             method_argument = self.options['method']
 
-        code = """
-print 1 + 1
-import matplotlib.pyplot as plt
-plt.plot([1,2,3,4])
-plt.ylabel('some numbers')
-plt.show()
-"""
-        url_1 = 'https://aleph.sagemath.org/service'
-        data = urllib.urlencode({"accepted_tos":"true",
-                                 "code": code})
+        resp = self._cell.execute_request('\n'.join(self.content))
+        
 
-        req = urllib2.Request(url_1, data)
-        rsp = urllib2.urlopen(req)
-        content = rsp.read()
-
-        print(content)
-
-        return [nodes.raw('', content, format='html')]
+        return [nodes.raw('','<pre>%s</pre>' % (pprint.pformat(resp),), format='html')]
 
 def register():
     directives.register_directive('sage', SageDirective)
