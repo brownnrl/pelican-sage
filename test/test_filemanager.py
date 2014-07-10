@@ -14,6 +14,23 @@ class TestFileManager(unittest.TestCase):
         except AlreadyExistsException:
             pass
 
+    def test_create_code_content(self):
+        manager = FileManager()
+        code = """
+        import numpy
+        """
+        code_id = manager.create_code(user_id='stuff', code=code)
+
+        content = manager.get_code_content(user_id='stuff')
+        self.assertEquals(content, code)
+
+        content = manager.get_code_content(code_id=code_id)
+        self.assertEquals(content, code)
+
+        self.assertEquals(manager.get_code_content(code_id=444), None)
+
+        self.assertEquals(manager.get_code_content(user_id='DNE'), None)
+
     def test_create_file(self):
         manager = FileManager()
         code_id = manager.create_code()
@@ -29,6 +46,20 @@ class TestFileManager(unittest.TestCase):
         verify.append((file_id_2, 'xxx2.png'))
         self.assertEquals(manager.get_files(code_id), verify)
 
+    def test_create_result(self):
+        manager = FileManager()
+        code_id = manager.create_code()
+
+        file_id = manager.create_file(code_id, 'xxx.png')
+        verify = [(file_id, 'xxx.png')]
+        self.assertEquals(manager.get_files(code_id), verify)
+
+        manager.create_code()
+
+        file_id_2 = manager.create_file(code_id, 'xxx2.png')
+
+        verify.append((file_id_2, 'xxx2.png'))
+        self.assertEquals(manager.get_files(code_id), verify)
 
 
 

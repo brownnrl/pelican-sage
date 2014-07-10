@@ -61,6 +61,38 @@ class FileManager(object):
         self._conn.commit()
         return last_id
 
+    def get_code_content(self, code_id=None, user_id=None):
+
+        if code_id is None and user_id is None:
+            raise TypeError("Must provide either code_id or user_id")
+        
+        cursor = self._conn.cursor()
+        ident = ('id', code_id) if user_id is None else ('user_id', user_id)
+
+        cursor.execute("SELECT content FROM CODEBLOCKS WHERE %s=?" % (ident[0],), (ident[1],))
+
+        result = [row for row in cursor]
+
+        return result[0][0] if result else None
+
+    def create_result(self, code_id, result_text):
+        cursor = self._conn.cursor()
+
+        cursor.execute("INSERT INTO STREAM_RESULTS (result, code_id) VALUES (?, ?)",
+                        (result_text, code_id))
+
+        last_id = cursor.lastrowid
+
+        self._conn.commit()
+        return last_id
+
+    def get_results(self, code_id):
+        cursor = self._conn.cursor()
+
+        cursor.execute("SELECT id, result FROM STREAM_RESULTS WHERE code_id=?", (code_id,))
+
+        return [row for row in cursor]
+
     def create_file(self, code_id, file_location):
         cursor = self._conn.cursor()
 
