@@ -7,9 +7,14 @@ class AlreadyExistsException(Exception):
 class FileManager(object):
 
     def __init__(self, location=None):
+        # Throw away results after each computation of pelican pages
         self.location = ':memory:' if location is None else location
 
-        create_tables = self.location == ':memory:' or os.path.isfile(self.location)
+
+        # Create the tables if we don't already have an existing file.
+        # If we have an existing file we assume that the tables have already
+        # been created.
+        create_tables = self.location == ':memory:' or not os.path.isfile(self.location)
 
         self._conn = sqlite3.connect(self.location)
 
@@ -21,7 +26,7 @@ class FileManager(object):
         CREATE TABLE CODEBLOCKS(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NULL,
-            content TEXT NULL
+            content TEXT UNIQUE NULL
         );
 
         CREATE TABLE STREAM_RESULTS(
@@ -50,10 +55,20 @@ class FileManager(object):
         # check for an existing user id
         cursor = self._conn.cursor()
 
-        cursor.execute("SELECT * FROM CODEBLOCKS WHERE user_id=?", (user_id,))
 
-        if cursor.rowcount > 0:
-            raise AlreadyExistsException(user_id)
+        if code is not None:
+            cursor.execute("SELECT id, content FROM CODEBLOCKS WHERE content=?", (code,))
+
+            fetch = cursor.fetchone()
+
+            if fetch is not None:
+                return fetch[0]
+
+        if user_id is not None:
+            cursor.execute("SELECT * FROM CODEBLOCKS WHERE user_id = ?", (user_id,))
+
+            if cursor.fetchone() is not None:
+                raise AlreadyExistsException(user_id)
 
         cursor.execute("INSERT INTO CODEBLOCKS (user_id, content) VALUES (?,?)", (user_id, code))
         last_id = cursor.lastrowid
@@ -71,9 +86,9 @@ class FileManager(object):
 
         cursor.execute("SELECT content FROM CODEBLOCKS WHERE %s=?" % (ident[0],), (ident[1],))
 
-        result = [row for row in cursor]
+        result = cursor.fetchone() 
 
-        return result[0][0] if result else None
+        return result[0] if result else None
 
     def create_result(self, code_id, result_text):
         cursor = self._conn.cursor()

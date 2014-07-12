@@ -24,8 +24,6 @@ class SageCell(object):
         # indicate acceptance in the data parameter below (see the API docs)
         self.req = urllib.request.Request(url=url+'kernel', data=bytes('accepted_tos=true','utf-8'),headers={'Accept': 'application/json'})
 
-        self._message_ids = []
-
         self._running = False
 
     def execute_request(self, code):
@@ -86,7 +84,6 @@ class SageCell(object):
 
     def _make_execute_request(self, code):
         message = str(uuid4())
-        self._message_ids.append(message)
 
         # Here is the general form for an execute_request message
         execute_request = {'header': {'msg_type': 'execute_request', 'msg_id': message, 'username': '', 'session': self.session},
@@ -106,12 +103,9 @@ def download_file(url, file_name):
         shutil.copyfileobj(response, out_file)
 
 def traverse_down(collection, *args):
-    print("traversing...")
     node = collection
     for arg in args:
         if arg in node:
-            print(arg)
-            print(node)
             node = node[arg]
         else:
             print(arg, "not in collection")
@@ -119,7 +113,7 @@ def traverse_down(collection, *args):
 
     return node
 
-def grab_images(result):
+def grab_images(result, location=None):
     kernel_url = result['kernel_url']
     iopub = result['iopub']
     for message in iopub:
