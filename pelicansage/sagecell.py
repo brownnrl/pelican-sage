@@ -98,6 +98,50 @@ class SageCell(object):
         self._shell.close()
         self._iopub.close()
 
+    def get_results_from_response(self, response):
+
+        raise NotImplemented("This function has yet to be fully implemented.")
+
+        kernel_url = response['kernel_url']
+        iopub = response['iopub']
+
+        results = []
+
+        # This will give us an ordering index to interleave results / images if we want.
+        message_index = 0
+
+        for message in iopub:
+            message_index += 1
+            if 'msg_type' in message and message['msg_type'] == "":
+                node = traverse_down(message, 'content', '', '')
+
+                if node is not None:
+                    results.append((message_index, node))
+
+        return results 
+
+    def get_image_urls_from_response(self, response):
+
+        kernel_url = response['kernel_url']
+        iopub = response['iopub']
+        file_url_base = kernel_url.replace('ws:','https:') + 'files/' 
+        file_urls = []
+
+        # This will give us an ordering index to interleave results / images if we want.
+        message_index = 0
+
+        for message in iopub:
+            message_index += 1
+            if 'msg_type' in message and message['msg_type'] == "display_data":
+                node = traverse_down(message, 'content', 'data', 'text/image-filename')
+
+                if node is not None:
+                    file_url = file_url_base + node
+                    file_urls.append((message_index, file_url_base + node))
+
+        return file_urls
+        
+
 def download_file(url, file_name):
     with urllib.request.urlopen(url) as response, open(file_name, 'wb') as out_file:
         shutil.copyfileobj(response, out_file)
@@ -114,15 +158,6 @@ def traverse_down(collection, *args):
     return node
 
 def grab_images(result, location=None):
-    kernel_url = result['kernel_url']
-    iopub = result['iopub']
-    for message in iopub:
-        if 'msg_type' in message and message['msg_type'] == "display_data":
-            node = traverse_down(message, 'content', 'data', 'text/image-filename')
-
-            if node is not None:
-                file_url = kernel_url.replace('ws:','https:') + 'files/' + node
-                download_file(file_url, node)
 
 def main():
     import sys
