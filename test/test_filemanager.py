@@ -2,6 +2,9 @@ import unittest
 
 from pelicansage.managefiles import FileManager, AlreadyExistsException
 
+# Test parameter
+url = 'http://www.whereverasdasdsadsadasd.com'
+
 class TestFileManager(unittest.TestCase):
 
     def test_create_code_content(self):
@@ -36,13 +39,14 @@ class TestFileManager(unittest.TestCase):
         manager = FileManager()
         code_id = manager.create_code()
 
-        file_id = manager.create_file(code_id, 'xxx.png')
+
+        file_id = manager.create_file(code_id, url, 'xxx.png')
         verify = [(file_id, 'xxx.png')]
         self.assertEquals(manager.get_files(code_id), verify)
 
         manager.create_code()
 
-        file_id_2 = manager.create_file(code_id, 'xxx2.png')
+        file_id_2 = manager.create_file(code_id, url, 'xxx2.png')
 
         verify.append((file_id_2, 'xxx2.png'))
         self.assertEquals(manager.get_files(code_id), verify)
@@ -51,13 +55,13 @@ class TestFileManager(unittest.TestCase):
         manager = FileManager()
         code_id = manager.create_code()
 
-        file_id = manager.create_file(code_id, 'xxx.png')
+        file_id = manager.create_file(code_id, url, 'xxx.png')
         verify = [(file_id, 'xxx.png')]
         self.assertEquals(manager.get_files(code_id), verify)
 
         manager.create_code()
 
-        file_id_2 = manager.create_file(code_id, 'xxx2.png')
+        file_id_2 = manager.create_file(code_id, url, 'xxx2.png')
 
         verify.append((file_id_2, 'xxx2.png'))
         self.assertEquals(manager.get_files(code_id), verify)

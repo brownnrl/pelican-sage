@@ -1,12 +1,41 @@
 import sqlite3
-import os.path
+import os, sys
+import errno
+
+import urllib, shutil
+
+try:
+    import urllib.request
+except ImportError:
+    pass
+
+def download_file(url, file_name):
+
+    print("Downloading", url, "to", file_name)
+
+    if sys.version_info.major == 3: 
+        with urllib.request.urlopen(url) as response, open(file_name, 'wb') as out_file:
+           shutil.copyfileobj(response, out_file)
+    else:
+        urllib.urlretrieve(url, file_name)
+
+
+# Accepted answer,
+# http://stackoverflow.com/questions/600268/mkdir-p-functionality-in-python 
+def create_directory_tree(path):
+    try:
+        os.makedirs(path)
+    except OSError as exc:
+        if exc.errno == errno.EEXIST and os.path.isdir(path):
+            pass
+        else: raise
 
 class AlreadyExistsException(Exception):
     pass
 
 class FileManager(object):
 
-    def __init__(self, location=None):
+    def __init__(self, location=None, base_path=None):
         # Throw away results after each computation of pelican pages
         self.location = ':memory:' if location is None else location
 
@@ -17,6 +46,8 @@ class FileManager(object):
         create_tables = self.location == ':memory:' or not os.path.isfile(self.location)
 
         self._conn = sqlite3.connect(self.location)
+
+        self._base_path = base_path
 
         if create_tables:
             self._create_tables()
@@ -108,14 +139,25 @@ class FileManager(object):
 
         return [row for row in cursor]
 
-    def create_file(self, code_id, file_location):
+    def create_file(self, code_id, url, file_name):
         cursor = self._conn.cursor()
 
+        file_location = None
+
+        if self._base_path is not None:
+            file_location_path = os.path.join(self._base_path, str(code_id))
+            create_directory_tree(file_location_path)
+            file_location = os.path.join(file_location_path, file_name)
+
+
         cursor.execute("INSERT INTO FILE_RESULT (file_location, code_id) VALUES (?, ?)",
-                       (file_location, code_id))
+                       (file_name, code_id))
 
         last_id = cursor.lastrowid
         self._conn.commit()
+
+        if file_location is not None:
+            download_file(url, file_location)
 
         return last_id
 

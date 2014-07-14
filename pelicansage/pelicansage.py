@@ -3,13 +3,21 @@ from __future__ import unicode_literals, print_function
 from docutils import nodes
 from docutils.parsers.rst import directives, Directive
 from docutils.parsers.rst.directives.images import Image
-from .sagecell import SageCell
+from docutils.parsers.rst.directives.body import CodeBlock
+from .sagecell import SageCell, ResultTypes
 from .managefiles import FileManager
 
 from pelican import signals
 
 import pprint
 
+import os
+
+try:
+    from ansi2html import Ansi2HTMLConverter
+    ansi_converter = Ansi2HTMLConverter().convert
+except ImportError:
+    ansi_converter = lambda x : '<pre>%s</pre>' % (x,)
 
 _SAGE_SETTINGS = {}
 
@@ -29,8 +37,8 @@ def sage_init(pelicanobj):
 
     process_settings(pelicanobj, settings)
 
-    _SAGE_CELL_INSTANCE = SageCell(_SAGE_SETTINGS['cell_url'])
-    _FILE_MANAGER = FileManager()
+    _SAGE_CELL_INSTANCE = SageCell(_SAGE_SETTINGS['CELL_URL'])
+    _FILE_MANAGER = FileManager(base_path=_SAGE_SETTINGS['FILE_BASE_PATH'])
 
 def merge_dict(k, d1, d2, transform=None):
     if k in d1:
@@ -41,19 +49,21 @@ def process_settings(pelicanobj, settings):
     global _SAGE_SETTINGS
 
     # Default settings
-    _SAGE_SETTINGS['cell_url'] = 'http://sagecell.sagemath.org'
+    _SAGE_SETTINGS['CELL_URL'] = 'http://sagecell.sagemath.org'
+    _SAGE_SETTINGS['FILE_BASE_PATH'] = os.path.join(pelicanobj.settings['OUTPUT_PATH'], 'images/sage')
 
 
     # Alias for merge_dict
     md = lambda k , t=None : merge_dict(k, settings, _SAGE_SETTINGS, t)
 
     if settings is not None:
-        md('cell_url')
+        md('CELL_URL')
+        md('FILE_BASE_PATH')
 
 def _define_choice(choice1, choice2):
     return lambda arg : directives.choice(arg, (choice1, choice2))
 
-class SageDirective(Directive):
+class SageDirective(CodeBlock):
     """ Embed a sage cell server into posts.
 
     Usage:
@@ -70,8 +80,6 @@ class SageDirective(Directive):
     
     """
 
-    required_arguments = 0
-    optional_arguments = 2
     final_argument_whitespace = False
     has_content = True
 
@@ -80,9 +88,15 @@ class SageDirective(Directive):
         super(SageDirective, self).__init__(*args, **kwargs)
         self._cell = _SAGE_CELL_INSTANCE    
 
-    option_spec = { 'method' : _define_choice('static', 'dynamic'),
-                    'show_code' : directives.flag
+    option_spec = { 'method'           : _define_choice('static', 'dynamic'),
+                    'suppress_code'    : directives.flag,
+                    'suppress_results' : directives.flag,
+                    'suppress_images'  : directives.flag,
+                    'suppress_streams' : directives.flag,
+                    'suppress_errors'  : directives.flag
                     }
+
+    option_spec.update(CodeBlock.option_spec)
 
     def _create_pre(self, content, code_id=None):
         preamble = 'CODE ID # %(code_id)s:<br/>' if code_id else ''
@@ -92,7 +106,56 @@ class SageDirective(Directive):
                          template % {'code_id' : code_id, 
                                      'content' : content}, 
                          format='html')
+
+    def _check_suppress(self, name):
+        for key in ('suppress_results', 'suppress_' + name):
+            if key in self.options:
+                return True
+
+        return False
+
+    def _process_error(self, code_id, error):
+        return nodes.raw('',
+                         ansi_converter(error.data.traceback),
+                         format='html')
+
+    def _process_stream(self, code_id, stream):
+        return self._create_pre(stream.data)
+
+    def _process_image(self, code_id, image):
+        _file_id = _FILE_MANAGER.create_file(code_id, image.data.url, image.data.name)
+
+        return nodes.image(uri='/images/sage/%s/%s' % (code_id, image.data.name))
+
+
+    def _process_results(self, code_id, results):
+
+        def suppress(code_id, x):
+            return None
+
+        def suppress_image(code_id, x):
+            # Needed because we still want to save the image, but we 
+            # will not use it immeadiately so throw away the result
+            self._process_image(code_id, x)
+            return None
+
+        pr_table = { ResultTypes.Error  : 
+                        suppress if self._check_suppress('errors') else self._process_error,
+                     ResultTypes.Stream : 
+                        suppress if self._check_suppress('streams') else self._process_stream,
+                     ResultTypes.Image : 
+                        supress_image if self._check_suppress('images') else self._process_image }
+
+        return [x for x in [pr_table[result.type](code_id, result) for result in results] if x is not None]
+
     def run(self):
+
+        if not self.arguments:
+            self.arguments = ['python']
+        
+        if 'number-lines' not in self.options:
+            self.options['number-lines'] = None
+
         method_argument = 'static'
         if 'method' in self.options:
             method_argument = self.options['method']
@@ -102,9 +165,16 @@ class SageDirective(Directive):
         resp = self._cell.execute_request(code_block)
 
         code_id = _FILE_MANAGER.create_code(code=code_block)
+        results = self._cell.get_results_from_response(resp)
 
-        return [self._create_pre(code_block, code_id),
-                self._create_pre(pprint.pformat(resp))]
+        if 'suppress_code' not in self.options:
+            return_nodes = super(SageDirective, self).run()
+        else:
+            return_nodes = []
+
+        return_nodes.extend(self._process_results(code_id, results))
+
+        return return_nodes
 
 class SageImage(Image):
     

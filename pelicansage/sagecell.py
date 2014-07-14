@@ -11,6 +11,19 @@ import urllib.request
 import shutil
 from uuid import uuid4
 
+from collections import namedtuple as NT
+from itertools import groupby
+
+CellResult = NT('CellResult', 'type order data')
+SageError = NT('SageError', 'ename evalue traceback')
+SageImage = NT('SageImage', 'name url')
+
+CR = CellResult
+
+class ResultTypes:
+    Image, Stream, Error = range(3)
+
+
 class SageCell(object):
     def __init__(self, url, timeout=10):
 
@@ -99,8 +112,21 @@ class SageCell(object):
         self._iopub.close()
 
     def get_results_from_response(self, response):
+        results = self.get_streams_from_response(response)
+        results.extend(self.get_image_urls_from_response(response))
+        results.extend(self.get_errors_from_response(response))
+        results.sort(key=lambda x: x.order)
+        results = [list(items) for order, items in groupby(results, key=lambda x: x.type)]
 
-        raise NotImplemented("This function has yet to be fully implemented.")
+        for indx in range(len(results)):
+            if results[indx][0].type == ResultTypes.Stream:
+                results[indx] = [CR(ResultTypes.Stream, 
+                                   results[indx][0].order, 
+                                   ''.join([x.data for x in results[indx]]))]
+        
+        return [item for sublist in results for item in sublist]
+
+    def get_streams_from_response(self, response):
 
         kernel_url = response['kernel_url']
         iopub = response['iopub']
@@ -112,13 +138,34 @@ class SageCell(object):
 
         for message in iopub:
             message_index += 1
-            if 'msg_type' in message and message['msg_type'] == "":
-                node = traverse_down(message, 'content', '', '')
+            if 'msg_type' in message and message['msg_type'] == "stream":
+                node = traverse_down(message, 'content', 'data')
 
                 if node is not None:
-                    results.append((message_index, node))
+                    results.append(CR(ResultTypes.Stream, message_index, node))
 
-        return results 
+        return results
+
+    def get_errors_from_response(self, response):
+
+        kernel_url = response['kernel_url']
+        iopub = response['iopub']
+
+        results = []
+
+        # This will give us an ordering index to interleave results / images if we want.
+        message_index = 0
+
+        for message in iopub:
+            message_index += 1
+            if 'msg_type' in message and message['msg_type'] == "pyerr":
+                node = traverse_down(message, 'content')
+
+                if node is not None:
+                    node['traceback'] = '\n'.join(node['traceback'])
+                    results.append(CR(ResultTypes.Error, message_index, SageError(**node)))
+
+        return results
 
     def get_image_urls_from_response(self, response):
 
@@ -137,14 +184,11 @@ class SageCell(object):
 
                 if node is not None:
                     file_url = file_url_base + node
-                    file_urls.append((message_index, file_url_base + node))
+                    file_urls.append(CR(ResultTypes.Image, message_index, SageImage(node, file_url_base + node)))
 
         return file_urls
         
 
-def download_file(url, file_name):
-    with urllib.request.urlopen(url) as response, open(file_name, 'wb') as out_file:
-        shutil.copyfileobj(response, out_file)
 
 def traverse_down(collection, *args):
     node = collection
@@ -152,12 +196,9 @@ def traverse_down(collection, *args):
         if arg in node:
             node = node[arg]
         else:
-            print(arg, "not in collection")
             return None
 
     return node
-
-def grab_images(result, location=None):
 
 def main():
     import sys
