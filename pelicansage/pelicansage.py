@@ -2,6 +2,7 @@ from __future__ import unicode_literals, print_function
 
 from docutils import nodes
 from docutils.parsers.rst import directives, Directive
+from docutils.parsers.rst.directives.images import Image
 from .sagecell import SageCell
 from .managefiles import FileManager
 
@@ -80,8 +81,17 @@ class SageDirective(Directive):
         self._cell = _SAGE_CELL_INSTANCE    
 
     option_spec = { 'method' : _define_choice('static', 'dynamic'),
-                    'show_code' : _define_choice('false','true') }
+                    'show_code' : directives.flag
+                    }
 
+    def _create_pre(self, content, code_id=None):
+        preamble = 'CODE ID # %(code_id)s:<br/>' if code_id else ''
+        id_attribute = ' id="code_block_%(code_id)s"' if code_id else ''
+        template = '%s<pre%s>%%(content)s</pre>' % (preamble, id_attribute)
+        return nodes.raw('',
+                         template % {'code_id' : code_id, 
+                                     'content' : content}, 
+                         format='html')
     def run(self):
         method_argument = 'static'
         if 'method' in self.options:
@@ -93,11 +103,19 @@ class SageDirective(Directive):
 
         code_id = _FILE_MANAGER.create_code(code=code_block)
 
-        return [nodes.raw('','CODE ID # %(code_id)s:<br/><pre id="code_block_%(code_id)s">%(content)s</pre>' % 
-                {'code_id' : code_id, 'content' : pprint.pformat(resp)}, format='html')]
+        return [self._create_pre(code_block, code_id),
+                self._create_pre(pprint.pformat(resp))]
+
+class SageImage(Image):
+    
+    def run(self):
+        print("RUNNING THE IMAGE DIRECTIVE:", self.arguments[0])
+        self.arguments[0] = "http://static3.businessinsider.com/image/52cddfb169beddee2a6c2246/the-29-coolest-us-air-force-images-of-the-year.jpg"
+        return super(SageImage, self).run()
 
 def register():
     directives.register_directive('sage', SageDirective)
+    directives.register_directive('sage-image', SageImage)
     signals.initialized.connect(sage_init)
     # I don't believe we need to connect to the content_object_init
     # as we handle this in the directive... revisit.
