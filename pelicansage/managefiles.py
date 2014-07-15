@@ -1,63 +1,78 @@
 import sqlite3
-import os, sys
-import errno
 
-import urllib, shutil
-
-try:
-    import urllib.request
-except ImportError:
-    pass
-
-def download_file(url, file_name):
-
-    print("Downloading", url, "to", file_name)
-
-    if sys.version_info.major == 3: 
-        with urllib.request.urlopen(url) as response, open(file_name, 'wb') as out_file:
-           shutil.copyfileobj(response, out_file)
-    else:
-        urllib.urlretrieve(url, file_name)
-
-
-# Accepted answer,
-# http://stackoverflow.com/questions/600268/mkdir-p-functionality-in-python 
-def create_directory_tree(path):
-    try:
-        os.makedirs(path)
-    except OSError as exc:
-        if exc.errno == errno.EEXIST and os.path.isdir(path):
-            pass
-        else: raise
+from .pelicansageio import pelicansageio
 
 class AlreadyExistsException(Exception):
     pass
 
+class EvaluationType(object):
+    STATIC, DYNAMIC, CLIENT = (1,2,3)
+
+class ORM(object):
+
+    def update(self, **kwargs):
+        for k, v in kwargs.items():
+            if hasattr(self, k) and v is not None:
+                setattr(self, k, v)
+
+class Table(ORM):
+    columns = tuple()
+
+    def __init__(self, **kwargs):
+        for column in self.columns:
+            setattr(self, column, '')
+        self.update(**kwargs)
+
+    @classmethod
+    def create(klass, *args):
+        zipped = dict(zip(klass.columns, args))
+        return klass(**zipped)
+
+class CodeBlock(Table):
+    columns = ('id', 'user_id', 'content', 'eval_type_id')
+
+class StreamResult(Table):
+    columns = ('id', 'result', 'code_id')
+
+class FileResult(Table):
+    columns = ('id', 'location', 'code_id')
+
 class FileManager(object):
 
-    def __init__(self, location=None, base_path=None):
+    def __init__(self, location=None, base_path=None, db_name=None, io=None):
+
+        self.io = pelicansageio if io is None else io
+
         # Throw away results after each computation of pelican pages
-        self.location = ':memory:' if location is None else location
-
-
-        # Create the tables if we don't already have an existing file.
-        # If we have an existing file we assume that the tables have already
-        # been created.
-        create_tables = self.location == ':memory:' or not os.path.isfile(self.location)
+        if location and location != ':memory:':
+            self.location = self.io.join(location, 'content.db' if db_name is None else db_name)
+            self.io.create_directory_tree(location)
+        else:
+            self.location = ':memory:'
 
         self._conn = sqlite3.connect(self.location)
 
         self._base_path = base_path
 
-        if create_tables:
-            self._create_tables()
+        self._create_tables()
 
     def _create_tables(self):
         code = """
+        CREATE TABLE EVALUATION_TYPES(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE
+        );
+
+        INSERT INTO EVALUATION_TYPES (name) VALUES ('STATIC');
+        INSERT INTO EVALUATION_TYPES (name) VALUES ('DYNAMIC');
+        INSERT INTO EVALUATION_TYPES (name) VALUES ('CLIENT');
+
         CREATE TABLE CODEBLOCKS(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NULL,
-            content TEXT UNIQUE NULL
+            content TEXT UNIQUE NULL,
+            eval_type_id INTEGER DEFAULT 1,
+            FOREIGN KEY(eval_type_id) REFERENCES EVALUATION_TYPES(id)
         );
 
         CREATE TABLE STREAM_RESULTS(
@@ -76,6 +91,11 @@ class FileManager(object):
         """
 
         cursor = self._conn.cursor()
+        
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='CODEBLOCKS'")
+
+        if cursor.fetchone() is not None:
+            return
 
         for c in code.split(';'):
             cursor.execute(c)
@@ -86,14 +106,13 @@ class FileManager(object):
         # check for an existing user id
         cursor = self._conn.cursor()
 
-
         if code is not None:
-            cursor.execute("SELECT id, content FROM CODEBLOCKS WHERE content=?", (code,))
+            cursor.execute("SELECT * FROM CODEBLOCKS WHERE content=?", (code,))
 
             fetch = cursor.fetchone()
 
             if fetch is not None:
-                return fetch[0]
+                return CodeBlock.create(*fetch)
 
         if user_id is not None:
             cursor.execute("SELECT * FROM CODEBLOCKS WHERE user_id = ?", (user_id,))
@@ -105,9 +124,11 @@ class FileManager(object):
         last_id = cursor.lastrowid
 
         self._conn.commit()
-        return last_id
 
-    def get_code_content(self, code_id=None, user_id=None):
+        cursor.execute("SELECT * FROM CODEBLOCKS WHERE id=?", (last_id,))
+        return CodeBlock.create(*cursor.fetchone())
+
+    def get_code(self, code_id=None, user_id=None):
 
         if code_id is None and user_id is None:
             raise TypeError("Must provide either code_id or user_id")
@@ -115,11 +136,11 @@ class FileManager(object):
         cursor = self._conn.cursor()
         ident = ('id', code_id) if user_id is None else ('user_id', user_id)
 
-        cursor.execute("SELECT content FROM CODEBLOCKS WHERE %s=?" % (ident[0],), (ident[1],))
+        cursor.execute("SELECT * FROM CODEBLOCKS WHERE %s=?" % (ident[0],), (ident[1],))
 
         result = cursor.fetchone() 
 
-        return result[0] if result else None
+        return CodeBlock.create(*result) if result else None
 
     def create_result(self, code_id, result_text):
         cursor = self._conn.cursor()
@@ -130,14 +151,16 @@ class FileManager(object):
         last_id = cursor.lastrowid
 
         self._conn.commit()
-        return last_id
+
+        cursor.execute("SELECT * FROM STREAM_RESULTS WHERE id=?", (last_id,))
+        return StreamResult.create(*cursor.fetchone()) 
 
     def get_results(self, code_id):
         cursor = self._conn.cursor()
 
-        cursor.execute("SELECT id, result FROM STREAM_RESULTS WHERE code_id=?", (code_id,))
+        cursor.execute("SELECT * FROM STREAM_RESULTS WHERE code_id=?", (code_id,))
 
-        return [row for row in cursor]
+        return [StreamResult.create(*row) for row in cursor]
 
     def create_file(self, code_id, url, file_name):
         cursor = self._conn.cursor()
@@ -145,9 +168,9 @@ class FileManager(object):
         file_location = None
 
         if self._base_path is not None:
-            file_location_path = os.path.join(self._base_path, str(code_id))
-            create_directory_tree(file_location_path)
-            file_location = os.path.join(file_location_path, file_name)
+            file_location_path = self.io.join(self._base_path, str(code_id))
+            self.io.create_directory_tree(file_location_path)
+            file_location = self.io.join(file_location_path, file_name)
 
 
         cursor.execute("INSERT INTO FILE_RESULT (file_location, code_id) VALUES (?, ?)",
@@ -157,14 +180,18 @@ class FileManager(object):
         self._conn.commit()
 
         if file_location is not None:
-            download_file(url, file_location)
+            self.io.download_file(url, file_location)
+        
+        cursor.execute("SELECT * FROM FILE_RESULT WHERE id=?", (last_id,))
 
-        return last_id
+        fetch = cursor.fetchone()
+
+        return FileResult.create(*fetch)
 
     def get_files(self, code_id):
         cursor = self._conn.cursor()
 
-        cursor.execute("SELECT id, file_location FROM FILE_RESULT WHERE code_id = ?", (code_id,))
+        cursor.execute("SELECT * FROM FILE_RESULT WHERE code_id = ?", (code_id,))
 
-        return [row for row in cursor]
+        return [FileResult.create(*row) for row in cursor]
 

@@ -1,5 +1,5 @@
 __title__ = 'pelicansage'
-__version__ = '0.01'
+__version__ = '0.10'
 __author__ = 'Nelson Brown'
 __credits = ['Nelson Brown',]
 __maintainer__ = "Nelson Brown"

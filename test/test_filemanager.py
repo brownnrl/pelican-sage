@@ -10,20 +10,20 @@ class TestFileManager(unittest.TestCase):
     def test_create_code_content(self):
         manager = FileManager()
         code = "xx"
-        code_id = manager.create_code(user_id='stuff', code=code)
+        code_obj = manager.create_code(user_id='stuff', code=code)
 
-        content = manager.get_code_content(user_id='stuff')
-        self.assertEquals(content, code)
+        code_obj_2 = manager.get_code(user_id='stuff')
+        self.assertEquals(code_obj_2.content, code)
 
-        content = manager.get_code_content(code_id=code_id)
-        self.assertEquals(content, code)
+        code_obj_2 = manager.get_code(code_id=code_obj.id)
+        self.assertEquals(code_obj_2.content, code)
 
         # Code with the same content has the same returned value
-        self.assertEquals(manager.create_code(code=code), code_id)
+        self.assertEquals(manager.create_code(code=code).id, code_obj.id)
 
-        self.assertEquals(manager.get_code_content(code_id=444), None)
+        self.assertEquals(manager.get_code(code_id=444), None)
 
-        self.assertEquals(manager.get_code_content(user_id='DNE'), None)
+        self.assertEquals(manager.get_code(user_id='DNE'), None)
 
     def test_create_code(self):
         manager = FileManager()
@@ -37,34 +37,39 @@ class TestFileManager(unittest.TestCase):
 
     def test_create_file(self):
         manager = FileManager()
-        code_id = manager.create_code()
+        code_obj = manager.create_code()
 
-
-        file_id = manager.create_file(code_id, url, 'xxx.png')
-        verify = [(file_id, 'xxx.png')]
-        self.assertEquals(manager.get_files(code_id), verify)
+        file_obj = manager.create_file(code_obj.id, url, 'xxx.png')
+        verify = [(file_obj.id, 'xxx.png')]
+        self.assertEquals([(fileobj.id, fileobj.location) 
+                            for fileobj in manager.get_files(code_obj.id)],
+                          verify)
 
         manager.create_code()
 
-        file_id_2 = manager.create_file(code_id, url, 'xxx2.png')
+        file_obj_2 = manager.create_file(code_obj.id, url, 'xxx2.png')
 
-        verify.append((file_id_2, 'xxx2.png'))
-        self.assertEquals(manager.get_files(code_id), verify)
+        verify.append((file_obj_2.id, 'xxx2.png'))
+        self.assertEquals([(fileobj.id, fileobj.location) 
+                            for fileobj in manager.get_files(code_obj.id)],
+                          verify)
 
     def test_create_result(self):
         manager = FileManager()
-        code_id = manager.create_code()
+        code_obj = manager.create_code()
 
-        file_id = manager.create_file(code_id, url, 'xxx.png')
-        verify = [(file_id, 'xxx.png')]
-        self.assertEquals(manager.get_files(code_id), verify)
+        file_obj = manager.create_file(code_obj.id, url, 'xxx.png')
+        verify = [(file_obj.id, 'xxx.png')]
+        self.assertEquals([(x.id, x.location) for x in manager.get_files(code_obj.id)],
+                          verify)
 
         manager.create_code()
 
-        file_id_2 = manager.create_file(code_id, url, 'xxx2.png')
+        file_obj_2 = manager.create_file(code_obj.id, url, 'xxx2.png')
 
-        verify.append((file_id_2, 'xxx2.png'))
-        self.assertEquals(manager.get_files(code_id), verify)
+        verify.append((file_obj_2.id, 'xxx2.png'))
+        self.assertEquals([(x.id, x.location) for x in manager.get_files(code_obj.id)],
+                          verify)
 
 if __name__ == '__main__':
     unittest.main()

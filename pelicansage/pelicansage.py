@@ -38,7 +38,8 @@ def sage_init(pelicanobj):
     process_settings(pelicanobj, settings)
 
     _SAGE_CELL_INSTANCE = SageCell(_SAGE_SETTINGS['CELL_URL'])
-    _FILE_MANAGER = FileManager(base_path=_SAGE_SETTINGS['FILE_BASE_PATH'])
+    _FILE_MANAGER = FileManager(location=_SAGE_SETTINGS['DB_PATH'],
+                                base_path=_SAGE_SETTINGS['FILE_BASE_PATH'])
 
 def merge_dict(k, d1, d2, transform=None):
     if k in d1:
@@ -51,14 +52,21 @@ def process_settings(pelicanobj, settings):
     # Default settings
     _SAGE_SETTINGS['CELL_URL'] = 'http://sagecell.sagemath.org'
     _SAGE_SETTINGS['FILE_BASE_PATH'] = os.path.join(pelicanobj.settings['OUTPUT_PATH'], 'images/sage')
+    _SAGE_SETTINGS['DB_PATH'] = ':memory:'
 
 
     # Alias for merge_dict
     md = lambda k , t=None : merge_dict(k, settings, _SAGE_SETTINGS, t)
 
+    def transform_content_db(x):
+        if x.startswith('{PATH}'):
+            x = x.replace('{PATH}',pelicanobj.settings['PATH'])
+        return x 
+
     if settings is not None:
         md('CELL_URL')
         md('FILE_BASE_PATH')
+        md('DB_PATH', transform_content_db)
 
 def _define_choice(choice1, choice2):
     return lambda arg : directives.choice(arg, (choice1, choice2))
@@ -164,7 +172,7 @@ class SageDirective(CodeBlock):
 
         resp = self._cell.execute_request(code_block)
 
-        code_id = _FILE_MANAGER.create_code(code=code_block)
+        code_id = _FILE_MANAGER.create_code(code=code_block).id
         results = self._cell.get_results_from_response(resp)
 
         if 'suppress_code' not in self.options:

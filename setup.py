@@ -10,6 +10,7 @@ setup(name='pelicansage',
       maintainer_email='brownnrl@gmail.com',
       description='Embed sage evaluation cells and results in posts.',
       license='MIT',
+      version=version,
       platforms=['linux'],
       packages=find_packages(exclude=["*.tests"]),
       package_data={'': ['LICENSE', ]},
@@ -25,4 +26,5 @@ setup(name='pelicansage',
           'Topic :: Text Processing',
       ],
       zip_safe=True,
+      install_requires=['pelican>=3.3.4','ansi2html>=1.0.6']
       )

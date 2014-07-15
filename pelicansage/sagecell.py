@@ -7,9 +7,9 @@ Requires the websocket-client package: http://pypi.python.org/pypi/websocket-cli
 import websocket
 import threading
 import json
-import urllib.request
-import shutil
 from uuid import uuid4
+
+from .pelicansageio import pelicansageio
 
 from collections import namedtuple as NT
 from itertools import groupby
@@ -25,7 +25,9 @@ class ResultTypes:
 
 
 class SageCell(object):
-    def __init__(self, url, timeout=10):
+    def __init__(self, url, timeout=10, io=None):
+
+        self.io = pelicansageio if io is None else io
 
         if not url.endswith('/'):
             url+='/'
@@ -35,14 +37,16 @@ class SageCell(object):
         # POST or GET <url>/kernel
         # if there is a terms of service agreement, you need to
         # indicate acceptance in the data parameter below (see the API docs)
-        self.req = urllib.request.Request(url=url+'kernel', data=bytes('accepted_tos=true','utf-8'),headers={'Accept': 'application/json'})
+        self.req = self.io.Request(url=url+'kernel',
+			           data=self.io.to_bytes('accepted_tos=true'),
+				   headers={'Accept': 'application/json'})
 
         self._running = False
 
     def execute_request(self, code):
         # zero out our list of messages, in case this is not the first request
         if not self._running:
-            resp = urllib.request.urlopen(self.req).read().decode('utf8')
+            resp = self.io.get_response(self.req)
             response = json.loads(resp)
             self.session = str(uuid4())
 
