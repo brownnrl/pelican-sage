@@ -5,8 +5,6 @@ from .pelicansageio import pelicansageio
 class AlreadyExistsException(Exception):
     pass
 
-class EvaluationType(object):
-    STATIC, DYNAMIC, CLIENT = (1,2,3)
 
 class ORM(object):
 
@@ -16,6 +14,7 @@ class ORM(object):
                 setattr(self, k, v)
 
 class Table(ORM):
+    name = ''
     columns = tuple()
 
     def __init__(self, **kwargs):
@@ -23,19 +22,85 @@ class Table(ORM):
             setattr(self, column, '')
         self.update(**kwargs)
 
+    def select(self, **kwargs):
+        items = kwargs.items()
+        where  = "WHERE " + ''.join(["%s = ? " % (k,) for k, _ in items])
+        select = "SELECT * FROM %s%s" % (self.name, where)
+
+
     @classmethod
     def create(klass, *args):
         zipped = dict(zip(klass.columns, args))
         return klass(**zipped)
 
+class EvaluationType(Table):
+    STATIC, DYNAMIC, CLIENT = (1,2,3)
+    create_sql = """
+                CREATE TABLE EVALUATION_TYPES(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE
+                );
+
+                INSERT INTO EVALUATION_TYPES (name) VALUES ('STATIC');
+                INSERT INTO EVALUATION_TYPES (name) VALUES ('DYNAMIC');
+                INSERT INTO EVALUATION_TYPES (name) VALUES ('CLIENT');
+                """
+
 class CodeBlock(Table):
+    name = 'CODEBLOCKS'
     columns = ('id', 'user_id', 'content', 'eval_type_id')
+    create_sql = """
+                CREATE TABLE CODEBLOCKS(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NULL,
+                    content TEXT UNIQUE NULL,
+                    eval_type_id INTEGER DEFAULT 1,
+                    last_evaluated timestamp,
+                    FOREIGN KEY(eval_type_id) REFERENCES EVALUATION_TYPES(id)
+                );
+                """
+                
+
 
 class StreamResult(Table):
+    name = 'STREAM_RESULTS'
     columns = ('id', 'result', 'code_id')
+    create_sql = """
+                 CREATE TABLE STREAM_RESULTS(
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     result TEXT NULL,
+                     code_id INTEGER,
+                     FOREIGN KEY(code_id) REFERENCES CODEBLOCKS(id)
+                 );
+                 """
 
 class FileResult(Table):
+    name = 'FILE_RESULTS'
     columns = ('id', 'location', 'code_id')
+    create_sql = """
+                 CREATE TABLE FILE_RESULT(
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     file_location TEXT,
+                     code_id INTEGER,
+                     FOREIGN KEY(code_id) REFERENCES CODEBLOCKS(id)
+                 );
+                 """
+
+class ErrorResult(Table):
+    name = 'ERROR_RESULTS'
+    columns = ('id', 'ename', 'evalue', 'traceback', 'code_id')
+    create_sql = """
+                 CREATE TABLE ERROR_RESULTS(
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     ename TEXT,
+                     evalue TEXT,
+                     traceback TEXT,
+                     code_id INTEGER,
+                     FOREIGN KEY(code_id) REFERENCES CODEBLOCKS(id)
+                 );
+                 """
+
+tables = (CodeBlock, StreamResult, FileResult, ErrorResult)
 
 class FileManager(object):
 
@@ -50,48 +115,20 @@ class FileManager(object):
         else:
             self.location = ':memory:'
 
-        self._conn = sqlite3.connect(self.location)
+        self._conn = sqlite3.connect(self.location, detect_types=sqlite3.PARSE_DECLTYPES)
 
         self._base_path = base_path
 
         self._create_tables()
 
     def _create_tables(self):
-        code = """
-        CREATE TABLE EVALUATION_TYPES(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE
-        );
 
-        INSERT INTO EVALUATION_TYPES (name) VALUES ('STATIC');
-        INSERT INTO EVALUATION_TYPES (name) VALUES ('DYNAMIC');
-        INSERT INTO EVALUATION_TYPES (name) VALUES ('CLIENT');
+        global tables
 
-        CREATE TABLE CODEBLOCKS(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NULL,
-            content TEXT UNIQUE NULL,
-            eval_type_id INTEGER DEFAULT 1,
-            FOREIGN KEY(eval_type_id) REFERENCES EVALUATION_TYPES(id)
-        );
-
-        CREATE TABLE STREAM_RESULTS(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            result TEXT NULL,
-            code_id INTEGER,
-            FOREIGN KEY(code_id) REFERENCES CODEBLOCKS(id)
-        );
-
-        CREATE TABLE FILE_RESULT(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_location TEXT,
-            code_id INTEGER,
-            FOREIGN KEY(code_id) REFERENCES CODEBLOCKS(id)
-        );
-        """
+        code = ''.join([table.create_sql for table in tables])
 
         cursor = self._conn.cursor()
-        
+    
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='CODEBLOCKS'")
 
         if cursor.fetchone() is not None:
