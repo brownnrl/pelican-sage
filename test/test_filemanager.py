@@ -2,6 +2,8 @@ import unittest
 
 from pelicansage.managefiles import FileManager, AlreadyExistsException
 
+from datetime import datetime
+
 # Test parameter
 url = 'http://www.whereverasdasdsadsadasd.com'
 
@@ -70,6 +72,26 @@ class TestFileManager(unittest.TestCase):
         verify.append((file_obj_2.id, 'xxx2.png'))
         self.assertEquals([(x.id, x.file_location) for x in manager.get_files(code_obj.id)],
                           verify)
+
+    def test_timestamp(self):
+
+        class dummy_io(object):
+            class datetime_dummy(object):
+                now = lambda self : datetime(year=2014,day=1,month=1)
+
+            datetime = datetime_dummy()
+
+        manager = FileManager(io=dummy_io())
+
+        code_obj = manager.create_code()
+
+        self.assertEquals(code_obj.last_evaluated, None)
+
+        manager.timestamp_code(code_obj.id)
+
+        code_obj = manager.get_code(code_id = code_obj.id)
+
+        self.assertEquals(code_obj.last_evaluated, dummy_io().datetime.now())
 
 if __name__ == '__main__':
     unittest.main()

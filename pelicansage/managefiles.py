@@ -117,6 +117,16 @@ class FileManager(object):
 
         return code_block
 
+    def timestamp_code(self, code_id, timestamp=None):
+
+        fetch = self._session.query(CodeBlock).filter_by(id=code_id).one()
+
+        fetch.last_evaluated = self.io.datetime.now() if timestamp is None else timestamp
+
+        self._session.add(fetch)
+
+        self._session.commit()
+
     def get_code(self, code_id=None, user_id=None):
 
         if code_id is None and user_id is None:

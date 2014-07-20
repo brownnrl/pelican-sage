@@ -170,10 +170,16 @@ class SageDirective(CodeBlock):
 
         code_block = '\n'.join(self.content)
 
-        resp = self._cell.execute_request(code_block)
 
-        code_id = _FILE_MANAGER.create_code(code=code_block).id
-        results = self._cell.get_results_from_response(resp)
+        code_obj = _FILE_MANAGER.create_code(code=code_block)
+        code_id = code_obj.id
+
+        if code_obj.last_evaluated is None:
+            resp = self._cell.execute_request(code_block)
+            _FILE_MANAGER.timestamp_code(code_obj.id)
+            results = self._cell.get_results_from_response(resp)
+        else:
+            raise Exception(str(code_obj.last_evaluated))
 
         if 'suppress_code' not in self.options:
             return_nodes = super(SageDirective, self).run()
