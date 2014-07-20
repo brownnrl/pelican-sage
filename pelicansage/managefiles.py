@@ -1,4 +1,10 @@
 import sqlite3
+import sqlalchemy
+from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy.types import DateTime
+from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.engine.reflection import Inspector
 
 from .pelicansageio import pelicansageio
 
@@ -6,101 +12,51 @@ class AlreadyExistsException(Exception):
     pass
 
 
-class ORM(object):
+Base = declarative_base()
 
-    def update(self, **kwargs):
-        for k, v in kwargs.items():
-            if hasattr(self, k) and v is not None:
-                setattr(self, k, v)
-
-class Table(ORM):
-    name = ''
-    columns = tuple()
-
-    def __init__(self, **kwargs):
-        for column in self.columns:
-            setattr(self, column, '')
-        self.update(**kwargs)
-
-    def select(self, **kwargs):
-        items = kwargs.items()
-        where  = "WHERE " + ''.join(["%s = ? " % (k,) for k, _ in items])
-        select = "SELECT * FROM %s%s" % (self.name, where)
-
-
-    @classmethod
-    def create(klass, *args):
-        zipped = dict(zip(klass.columns, args))
-        return klass(**zipped)
-
-class EvaluationType(Table):
+class EvaluationType(Base):
+    __tablename__ = 'EvaluationType'
     STATIC, DYNAMIC, CLIENT = (1,2,3)
-    create_sql = """
-                CREATE TABLE EVALUATION_TYPES(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE
-                );
 
-                INSERT INTO EVALUATION_TYPES (name) VALUES ('STATIC');
-                INSERT INTO EVALUATION_TYPES (name) VALUES ('DYNAMIC');
-                INSERT INTO EVALUATION_TYPES (name) VALUES ('CLIENT');
-                """
+    id = Column(Integer, primary_key=True)
+    name = Column(String, unique=True)
 
-class CodeBlock(Table):
-    name = 'CODEBLOCKS'
-    columns = ('id', 'user_id', 'content', 'eval_type_id')
-    create_sql = """
-                CREATE TABLE CODEBLOCKS(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT NULL,
-                    content TEXT UNIQUE NULL,
-                    eval_type_id INTEGER DEFAULT 1,
-                    last_evaluated timestamp,
-                    FOREIGN KEY(eval_type_id) REFERENCES EVALUATION_TYPES(id)
-                );
-                """
-                
+class CodeBlock(Base):
+    __tablename__ = 'CodeBlock'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String, unique=True)
+    content = Column(String, unique=True)
+    eval_type_id = Column(Integer, ForeignKey('EvaluationType.id'),default=1)
+    last_evaluated = Column(DateTime)
 
+    stream_results = relationship('StreamResult', backref='CodeBlock')
+    file_results = relationship('FileResult', backref='CodeBlock')
+    error_results = relationship('ErrorResult', backref='CodeBlock')
 
-class StreamResult(Table):
-    name = 'STREAM_RESULTS'
-    columns = ('id', 'result', 'code_id')
-    create_sql = """
-                 CREATE TABLE STREAM_RESULTS(
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     result TEXT NULL,
-                     code_id INTEGER,
-                     FOREIGN KEY(code_id) REFERENCES CODEBLOCKS(id)
-                 );
-                 """
+class StreamResult(Base):
+    __tablename__ = 'StreamResult'
+    id = Column(Integer, primary_key=True)
+    result = Column(String, nullable=True)
+    code_id = Column(Integer, ForeignKey('CodeBlock.id'), nullable=False)
+    order = Column(Integer)
 
-class FileResult(Table):
-    name = 'FILE_RESULTS'
+class FileResult(Base):
+    __tablename__ = 'FileResult'
     columns = ('id', 'location', 'code_id')
-    create_sql = """
-                 CREATE TABLE FILE_RESULT(
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     file_location TEXT,
-                     code_id INTEGER,
-                     FOREIGN KEY(code_id) REFERENCES CODEBLOCKS(id)
-                 );
-                 """
+    id = Column(Integer, primary_key=True)
+    file_location = Column(String)
+    order = Column(Integer)
+    code_id = Column(Integer, ForeignKey('CodeBlock.id'), nullable=False)
 
-class ErrorResult(Table):
-    name = 'ERROR_RESULTS'
+class ErrorResult(Base):
+    __tablename__ = 'ErrorResult'
     columns = ('id', 'ename', 'evalue', 'traceback', 'code_id')
-    create_sql = """
-                 CREATE TABLE ERROR_RESULTS(
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     ename TEXT,
-                     evalue TEXT,
-                     traceback TEXT,
-                     code_id INTEGER,
-                     FOREIGN KEY(code_id) REFERENCES CODEBLOCKS(id)
-                 );
-                 """
-
-tables = (CodeBlock, StreamResult, FileResult, ErrorResult)
+    id = Column(Integer, primary_key=True)
+    order = Column(Integer)
+    ename = Column(String)
+    evalue = Column(String)
+    traceback = Column(String)
+    code_id = Column(Integer, ForeignKey('CodeBlock.id'), nullable=False)
 
 class FileManager(object):
 
@@ -115,7 +71,9 @@ class FileManager(object):
         else:
             self.location = ':memory:'
 
-        self._conn = sqlite3.connect(self.location, detect_types=sqlite3.PARSE_DECLTYPES)
+        self._engine = sqlalchemy.create_engine('sqlite:///' + self.location)
+
+        self._session = sessionmaker(bind=self._engine)()
 
         self._base_path = base_path
 
@@ -123,84 +81,68 @@ class FileManager(object):
 
     def _create_tables(self):
 
-        global tables
+        insp = Inspector.from_engine(self._engine)
 
-        code = ''.join([table.create_sql for table in tables])
-
-        cursor = self._conn.cursor()
-    
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='CODEBLOCKS'")
-
-        if cursor.fetchone() is not None:
+        if 'CodeBlocks' in insp.get_table_names():
             return
 
-        for c in code.split(';'):
-            cursor.execute(c)
+        Base.metadata.create_all(self._engine)
 
-        self._conn.commit()
+        #hmm... i dunno...
+        self._session.add(EvaluationType(name='STATIC'))
+        self._session.add(EvaluationType(name='DYNAMIC'))
+        self._session.add(EvaluationType(name='CLIENT'))
+        
+        self._session.commit()
 
     def create_code(self, user_id=None, code=None):
         # check for an existing user id
-        cursor = self._conn.cursor()
 
         if code is not None:
-            cursor.execute("SELECT * FROM CODEBLOCKS WHERE content=?", (code,))
-
-            fetch = cursor.fetchone()
+            fetch = self._session.query(CodeBlock).filter_by(content=code).first()
 
             if fetch is not None:
-                return CodeBlock.create(*fetch)
+                return fetch 
 
         if user_id is not None:
-            cursor.execute("SELECT * FROM CODEBLOCKS WHERE user_id = ?", (user_id,))
+            fetch = self._session.query(CodeBlock).filter_by(content=code).first()
 
-            if cursor.fetchone() is not None:
-                raise AlreadyExistsException(user_id)
+            if fetch is not None:
+                return fetch 
 
-        cursor.execute("INSERT INTO CODEBLOCKS (user_id, content) VALUES (?,?)", (user_id, code))
-        last_id = cursor.lastrowid
+        code_block = CodeBlock(user_id=user_id, content=code)
+        
+        self._session.add(code_block)
 
-        self._conn.commit()
+        self._session.commit()
 
-        cursor.execute("SELECT * FROM CODEBLOCKS WHERE id=?", (last_id,))
-        return CodeBlock.create(*cursor.fetchone())
+        return code_block
 
     def get_code(self, code_id=None, user_id=None):
 
         if code_id is None and user_id is None:
             raise TypeError("Must provide either code_id or user_id")
         
-        cursor = self._conn.cursor()
-        ident = ('id', code_id) if user_id is None else ('user_id', user_id)
+        if user_id:
+            return self._session.query(CodeBlock).filter_by(user_id=user_id).first()
 
-        cursor.execute("SELECT * FROM CODEBLOCKS WHERE %s=?" % (ident[0],), (ident[1],))
+        return self._session.query(CodeBlock).filter_by(id=code_id).first()
 
-        result = cursor.fetchone() 
-
-        return CodeBlock.create(*result) if result else None
 
     def create_result(self, code_id, result_text):
-        cursor = self._conn.cursor()
 
-        cursor.execute("INSERT INTO STREAM_RESULTS (result, code_id) VALUES (?, ?)",
-                        (result_text, code_id))
+        result = StreamResult(result=result_text, code_id=code_id)
 
-        last_id = cursor.lastrowid
+        self._session.add(result)
+        self._session.commit()
 
-        self._conn.commit()
-
-        cursor.execute("SELECT * FROM STREAM_RESULTS WHERE id=?", (last_id,))
-        return StreamResult.create(*cursor.fetchone()) 
+        return result
 
     def get_results(self, code_id):
-        cursor = self._conn.cursor()
 
-        cursor.execute("SELECT * FROM STREAM_RESULTS WHERE code_id=?", (code_id,))
-
-        return [StreamResult.create(*row) for row in cursor]
+        return self._session.query(CodeBlock).filter_by(id=code_id).stream_results
 
     def create_file(self, code_id, url, file_name):
-        cursor = self._conn.cursor()
 
         file_location = None
 
@@ -209,26 +151,19 @@ class FileManager(object):
             self.io.create_directory_tree(file_location_path)
             file_location = self.io.join(file_location_path, file_name)
 
-
-        cursor.execute("INSERT INTO FILE_RESULT (file_location, code_id) VALUES (?, ?)",
-                       (file_name, code_id))
-
-        last_id = cursor.lastrowid
-        self._conn.commit()
-
         if file_location is not None:
             self.io.download_file(url, file_location)
-        
-        cursor.execute("SELECT * FROM FILE_RESULT WHERE id=?", (last_id,))
 
-        fetch = cursor.fetchone()
+        file_result = FileResult(code_id=code_id,
+                                 file_location=file_location if file_location else file_name)
 
-        return FileResult.create(*fetch)
+        self._session.add(file_result)
+
+        self._session.commit()
+
+        return file_result
 
     def get_files(self, code_id):
-        cursor = self._conn.cursor()
 
-        cursor.execute("SELECT * FROM FILE_RESULT WHERE code_id = ?", (code_id,))
-
-        return [FileResult.create(*row) for row in cursor]
+        return self._session.query(CodeBlock).filter_by(id=code_id).one().file_results
 

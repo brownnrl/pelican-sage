@@ -41,7 +41,7 @@ class TestFileManager(unittest.TestCase):
 
         file_obj = manager.create_file(code_obj.id, url, 'xxx.png')
         verify = [(file_obj.id, 'xxx.png')]
-        self.assertEquals([(fileobj.id, fileobj.location) 
+        self.assertEquals([(fileobj.id, fileobj.file_location) 
                             for fileobj in manager.get_files(code_obj.id)],
                           verify)
 
@@ -50,7 +50,7 @@ class TestFileManager(unittest.TestCase):
         file_obj_2 = manager.create_file(code_obj.id, url, 'xxx2.png')
 
         verify.append((file_obj_2.id, 'xxx2.png'))
-        self.assertEquals([(fileobj.id, fileobj.location) 
+        self.assertEquals([(fileobj.id, fileobj.file_location) 
                             for fileobj in manager.get_files(code_obj.id)],
                           verify)
 
@@ -60,7 +60,7 @@ class TestFileManager(unittest.TestCase):
 
         file_obj = manager.create_file(code_obj.id, url, 'xxx.png')
         verify = [(file_obj.id, 'xxx.png')]
-        self.assertEquals([(x.id, x.location) for x in manager.get_files(code_obj.id)],
+        self.assertEquals([(x.id, x.file_location) for x in manager.get_files(code_obj.id)],
                           verify)
 
         manager.create_code()
@@ -68,7 +68,7 @@ class TestFileManager(unittest.TestCase):
         file_obj_2 = manager.create_file(code_obj.id, url, 'xxx2.png')
 
         verify.append((file_obj_2.id, 'xxx2.png'))
-        self.assertEquals([(x.id, x.location) for x in manager.get_files(code_obj.id)],
+        self.assertEquals([(x.id, x.file_location) for x in manager.get_files(code_obj.id)],
                           verify)
 
 if __name__ == '__main__':
