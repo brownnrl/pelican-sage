@@ -83,12 +83,11 @@ class FileManager(object):
 
         insp = Inspector.from_engine(self._engine)
 
-        if 'CodeBlocks' in insp.get_table_names():
+        if 'CodeBlock' in insp.get_table_names():
             return
 
         Base.metadata.create_all(self._engine)
 
-        #hmm... i dunno...
         self._session.add(EvaluationType(name='STATIC'))
         self._session.add(EvaluationType(name='DYNAMIC'))
         self._session.add(EvaluationType(name='CLIENT'))
