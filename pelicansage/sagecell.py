@@ -11,18 +11,16 @@ from uuid import uuid4
 
 from .pelicansageio import pelicansageio
 
+from .managefiles import ResultTypes
+
 from collections import namedtuple as NT
 from itertools import groupby
 
 CellResult = NT('CellResult', 'type order data')
 SageError = NT('SageError', 'ename evalue traceback')
-SageImage = NT('SageImage', 'name url')
+SageImage = NT('SageImage', 'file_name url')
 
 CR = CellResult
-
-class ResultTypes:
-    Image, Stream, Error = range(3)
-
 
 class SageCell(object):
     def __init__(self, url, timeout=10, io=None):
@@ -125,8 +123,8 @@ class SageCell(object):
         for indx in range(len(results)):
             if results[indx][0].type == ResultTypes.Stream:
                 results[indx] = [CR(ResultTypes.Stream, 
-                                   results[indx][0].order, 
-                                   ''.join([x.data for x in results[indx]]))]
+                                    results[indx][0].order, 
+                                    ''.join([x.data for x in results[indx]]))]
         
         return [item for sublist in results for item in sublist]
 

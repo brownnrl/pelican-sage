@@ -12,7 +12,7 @@ class TestFileManager(unittest.TestCase):
     def test_create_code_content(self):
         manager = FileManager()
         code = "xx"
-        code_obj = manager.create_code(user_id='stuff', code=code)
+        code_obj = manager.create_code(user_id='stuff', code=code, src='A.rst', order=1)
 
         code_obj_2 = manager.get_code(user_id='stuff')
         self.assertEquals(code_obj_2.content, code)
@@ -21,7 +21,7 @@ class TestFileManager(unittest.TestCase):
         self.assertEquals(code_obj_2.content, code)
 
         # Code with the same content has the same returned value
-        self.assertEquals(manager.create_code(code=code).id, code_obj.id)
+        self.assertEquals(manager.create_code(code=code, src='A.rst', order=1).id, code_obj.id)
 
         self.assertEquals(manager.get_code(code_id=444), None)
 

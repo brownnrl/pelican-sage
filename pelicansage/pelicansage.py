@@ -1,11 +1,12 @@
 from __future__ import unicode_literals, print_function
 
+from collections import defaultdict
 from docutils import nodes
 from docutils.parsers.rst import directives, Directive
 from docutils.parsers.rst.directives.images import Image
 from docutils.parsers.rst.directives.body import CodeBlock
 from .sagecell import SageCell, ResultTypes
-from .managefiles import FileManager
+from .managefiles import FileManager, EvaluationType
 
 from pelican import signals
 
@@ -88,6 +89,8 @@ class SageDirective(CodeBlock):
     
     """
 
+    _src_order = defaultdict(lambda : 0) 
+
     final_argument_whitespace = False
     has_content = True
 
@@ -122,39 +125,57 @@ class SageDirective(CodeBlock):
 
         return False
 
-    def _process_error(self, code_id, error):
+    def _process_error(self, code_id, error, order):
+        _FILE_MANAGER.create_error(code_id, 
+                                   error.data.ename,
+                                   error.data.evalue,
+                                   error.data.traceback,
+                                   order)
+
+    def _transform_error(self, code_id, error, order):
         return nodes.raw('',
                          ansi_converter(error.data.traceback),
                          format='html')
 
-    def _process_stream(self, code_id, stream):
+    def _process_stream(self, code_id, stream, order):
+        _FILE_MANAGER.create_result(code_id, stream.data, order)
+    
+    def _transform_stream(self, code_id, stream, order):
         return self._create_pre(stream.data)
 
-    def _process_image(self, code_id, image):
-        _file_id = _FILE_MANAGER.create_file(code_id, image.data.url, image.data.name)
+    def _process_image(self, code_id, image, order):
+        _file_id = _FILE_MANAGER.create_file(code_id, image.data.url, image.data.file_name, order)
 
-        return nodes.image(uri='/images/sage/%s/%s' % (code_id, image.data.name))
+    def _transform_image(self, code_id, image, order):
+        return nodes.image(uri='/images/sage/%s/%s' % (code_id, image.data.file_name))
+
+    def _transform_results(self, code_id, results):
+
+        num_names = [(x,y) for x,y in zip(ResultTypes.ALL_NUM, ResultTypes.ALL_STR)]
+
+        def suppress(code_id, x, order):
+            return None
+
+        tr_table = dict([(x,getattr(self,'_transform_%s'%y)
+                            if not self._check_suppress('%ss'%y)
+                            else suppress) for x,y in num_names])
+
+        transformed_nodes = []
+        for order, result in enumerate(results):
+            transformed_node = tr_table[result.type](code_id, result, order)
+            if transformed_node is not None:
+                transformed_nodes.append(transformed_node)
+        return transformed_nodes
 
 
     def _process_results(self, code_id, results):
 
-        def suppress(code_id, x):
-            return None
+        num_names = [(x,y) for x,y in zip(ResultTypes.ALL_NUM, ResultTypes.ALL_STR)]
 
-        def suppress_image(code_id, x):
-            # Needed because we still want to save the image, but we 
-            # will not use it immeadiately so throw away the result
-            self._process_image(code_id, x)
-            return None
+        pr_table = dict([(x, getattr(self,'_process_%s'%y)) for x, y in num_names])
 
-        pr_table = { ResultTypes.Error  : 
-                        suppress if self._check_suppress('errors') else self._process_error,
-                     ResultTypes.Stream : 
-                        suppress if self._check_suppress('streams') else self._process_stream,
-                     ResultTypes.Image : 
-                        supress_image if self._check_suppress('images') else self._process_image }
-
-        return [x for x in [pr_table[result.type](code_id, result) for result in results] if x is not None]
+        for order, result in enumerate(results):
+            pr_table[result.type](code_id, result, order)
 
     def run(self):
 
@@ -168,25 +189,34 @@ class SageDirective(CodeBlock):
         if 'method' in self.options:
             method_argument = self.options['method']
 
+        # grab the order and bump it up
+        
+        doc = self.state_machine.document
+        src = doc.source or doc.current_source
+        order = self._src_order[src]
+        self._src_order[src] = order + 1
+
         code_block = '\n'.join(self.content)
 
-
-        code_obj = _FILE_MANAGER.create_code(code=code_block)
+        code_obj = _FILE_MANAGER.create_code(code=code_block,
+                                             src=src,
+                                             order=order)
         code_id = code_obj.id
 
         if code_obj.last_evaluated is None:
             resp = self._cell.execute_request(code_block)
             _FILE_MANAGER.timestamp_code(code_obj.id)
             results = self._cell.get_results_from_response(resp)
+            self._process_results(code_id, results)
         else:
-            raise Exception(str(code_obj.last_evaluated))
+            results = code_obj.results
 
         if 'suppress_code' not in self.options:
             return_nodes = super(SageDirective, self).run()
         else:
             return_nodes = []
 
-        return_nodes.extend(self._process_results(code_id, results))
+        return_nodes.extend(self._transform_results(code_id, results))
 
         return return_nodes
 
