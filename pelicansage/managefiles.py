@@ -8,9 +8,6 @@ from sqlalchemy.engine.reflection import Inspector
 
 from .pelicansageio import pelicansageio
 
-class AlreadyExistsException(Exception):
-    pass
-
 class ResultTypes:
     Image, Stream, Error = range(3)
     ALL_STR = ('image', 'stream', 'error')
@@ -37,21 +34,50 @@ class Src(Base, BaseMixin):
     id = Column(Integer, primary_key=True)
     src = Column(String, unique=True)
     
-    code_blocks = relationship('CodeBlock', backref='Src')
+    code_blocks = relationship('CodeBlock', backref='Src',
+                                cascade='save-update, merge, delete')
+
+class SrcReference(Base):
+    """
+    This relationship is src1 makes reference to src2.
+
+    So if src2 is updated, then src1 must be touched so it
+    can be updated.
+    """
+    __tablename__ = 'SrcReferences'
+    id = Column(Integer, primary_key=True)
+    src_id1 = Column(Integer, ForeignKey('Src.id'),nullable=False)
+    src_id2 = Column(Integer, ForeignKey('Src.id'),nullable=False)
+
+class SrcInclude(Base):
+    """
+    This relationship is much like the reference, but with a different
+    implication.  Each code block from the src1 is first run
+    in a new namespace before running the blocks that occur in src2
+    in the same namespace.
+    """
+    __tablename__ = 'SrcIncudes'
+    id = Column(Integer, primary_key=True)
+    src_id1 = Column(Integer, ForeignKey('Src.id'),nullable=False)
+    src_id2 = Column(Integer, ForeignKey('Src.id'),nullable=False)
 
 class CodeBlock(Base, BaseMixin):
     __tablename__ = 'CodeBlock'
     id = Column(Integer, primary_key=True)
-    user_id = Column(String, unique=True)
+    user_id = Column(String)
     src_id = Column(Integer, ForeignKey('Src.id'))
     order = Column(Integer)
     content = Column(String)
     eval_type_id = Column(Integer, ForeignKey('EvaluationType.id'),default=1)
     last_evaluated = Column(DateTime)
 
-    stream_results = relationship('StreamResult', backref='CodeBlock')
-    file_results = relationship('FileResult', backref='CodeBlock')
-    error_results = relationship('ErrorResult', backref='CodeBlock')
+    src = relationship('Src', backref='Src')
+    stream_results = relationship('StreamResult', backref='CodeBlock',
+                                   cascade='save-update, merge, delete')
+    file_results = relationship('FileResult', backref='CodeBlock',
+                                   cascade='save-update, merge, delete')
+    error_results = relationship('ErrorResult', backref='CodeBlock',
+                                   cascade='save-update, merge, delete')
 
     @property
     def results(self):
@@ -64,6 +90,10 @@ class StreamResult(Base, BaseMixin):
     result = Column(String, nullable=True)
     code_id = Column(Integer, ForeignKey('CodeBlock.id'), nullable=False)
     order = Column(Integer)
+
+    @property
+    def data(self):
+        return self.result
 
     type = ResultTypes.Stream
 
@@ -107,6 +137,8 @@ class FileManager(object):
 
         self._create_tables()
 
+        self._current_evaluations = set() 
+
     def _create_tables(self):
 
         insp = Inspector.from_engine(self._engine)
@@ -122,15 +154,24 @@ class FileManager(object):
         
         self._session.commit()
 
-    def create_code(self, user_id=None, code=None, src=None, order=None):
-        # check for an exisiting user id
+    def create_reference(self, src1, src2):
 
-        if user_id is not None:
-            fetch = self._session.query(CodeBlock).filter_by(user_id=user_id).first()
+        src1_obj = self.create_src(src1)
+        src2_obj = self.create_src(src2)
 
-            if fetch is not None:
-                return fetch 
+        src_ref_obj = self._session.query(SrcReference)\
+                            .filter(SrcReference.src_id1==src1_obj.id,
+                                    SrcReference.src_id2==src2_obj.id)\
+                            .first()
 
+        if src_ref_obj is None:
+            src_ref_obj = SrcReference(src_id1=src1_obj.id, src_id2=src2_obj.id)
+
+        return src_ref_obj
+
+
+
+    def create_src(self, src):
         src_obj = self._session.query(Src).filter_by(src=src).first()
 
         if src_obj is None:
@@ -139,6 +180,30 @@ class FileManager(object):
             self._session.add(Src(src=src))
             self._session.commit()
             src_obj = self._session.query(Src).filter_by(src=src).first()
+
+        return src_obj
+
+    def create_code(self, code, src, order, user_id=None):
+        # check for an exisiting user id
+
+        if user_id is not None:
+            fetch = self._session.query(Src, CodeBlock)\
+                                 .join(CodeBlock)\
+                                 .join(Src)\
+                                 .filter(Src.src==src, 
+                                         CodeBlock.user_id==user_id)\
+                                 .first()
+
+            if fetch is not None:
+                fetch_src, fetch = fetch
+                if fetch.order != order:
+                    # Resolve by removing the other tag.
+                    # So 'last tag remaining' wins.
+                    fetch.user_id = None
+                    self._session.add(fetch)
+                    self._session.commit()
+
+        src_obj = self.create_src(src)
 
         fetch = self._session.query(CodeBlock).filter_by(src_id=src_obj.id,
                                                          order=order).first()
@@ -149,6 +214,11 @@ class FileManager(object):
                               user_id=user_id,
                               order=order)
         elif fetch.content != code:
+			# We remove all code blocks for that source
+            self._session.query(CodeBlock).filter(CodeBlock.src_id==src_obj.id,
+                                                  CodeBlock.order > fetch.order).delete()
+            self._session.commit()
+			
             fetch.content=code
             fetch.last_evaluated = None
 
@@ -178,6 +248,20 @@ class FileManager(object):
 
         return self._session.query(CodeBlock).filter_by(id=code_id).first()
 
+    def mark_evaluated(self, code_obj):
+
+        self._current_evalautions.add((code_obj.src.id, code_obj.id))
+        code_obj.last_evaluated = datetime.now()
+
+        self._session.add(code_obj)
+        self._session.commit()
+
+    def get_code_block_chain(self, code_obj):
+
+        if (code_obj.src.id, code_obj.id) in self._current_evaluations:
+            return []
+
+        code_objects = self._session.query(CodeBlock).filter_by(src_id=code_obj.src.id)
 
     def create_result(self, code_id, result_text, order=None):
 
@@ -189,8 +273,11 @@ class FileManager(object):
         return result
 
     def get_results(self, code_id):
+        code_obj = self._session.query(CodeBlock).filter_by(id=code_id).first()
+        if code_obj is None:
+            return []
 
-        return self._session.query(CodeBlock).filter_by(id=code_id).stream_results
+        return code_obj.stream_results
 
     def create_file(self, code_id, url, file_name, order=None):
 
@@ -216,9 +303,11 @@ class FileManager(object):
         return file_result
 
     def get_files(self, code_id):
+        code_obj = self._session.query(CodeBlock).filter_by(id=code_id).first()
+        if code_obj is None:
+            return []
 
-        return self._session.query(CodeBlock).filter_by(id=code_id).one().file_results
-
+        return code_obj.file_results
 
     def create_error(self, code_id, ename, evalue, traceback, order=None):
         error_result = ErrorResult(code_id=code_id,

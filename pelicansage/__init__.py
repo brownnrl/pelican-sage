@@ -10,4 +10,3 @@ __copyright__ = 'Copyright 2014'
 
 
 from .pelicansage import register
-

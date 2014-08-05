@@ -41,7 +41,7 @@ class SageCell(object):
 
         self._running = False
 
-    def execute_request(self, code):
+    def execute_request(self, code, store_history=False):
         # zero out our list of messages, in case this is not the first request
         if not self._running:
             resp = self.io.get_response(self.req)
@@ -66,7 +66,7 @@ class SageCell(object):
         self.iopub_messages = []
 
         # Send the JSON execute_request message string down the shell channel
-        msg = self._make_execute_request(code)
+        msg = self._make_execute_request(code, store_history)
         self._shell.send(msg)
             
         # We use threads so that we can simultaneously get the messages on both channels.
@@ -97,14 +97,19 @@ class SageCell(object):
             if msg['header']['msg_type'] == 'status' and msg['content']['execution_state'] == 'idle':
                 break
 
-    def _make_execute_request(self, code):
+    def _make_execute_request(self, code, store_history=False):
         message = str(uuid4())
 
         # Here is the general form for an execute_request message
         execute_request = {'header': {'msg_type': 'execute_request', 'msg_id': message, 'username': '', 'session': self.session},
                             'parent_header':{},
                             'metadata': {},
-                            'content': {'code': code, 'silent': False, 'user_variables': [], 'user_expressions': {'_sagecell_files': 'sys._sage_.new_files()'}, 'allow_stdin': False}}
+                            'content': {'code': code, 
+								        'silent': False, 
+										'store_history' : store_history,
+										'user_variables': [], 
+										'user_expressions': {'_sagecell_files': 'sys._sage_.new_files()'}, 
+										'allow_stdin': False}}
 
         return json.dumps(execute_request)
 

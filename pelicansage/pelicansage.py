@@ -8,11 +8,18 @@ from docutils.parsers.rst.directives.body import CodeBlock
 from .sagecell import SageCell, ResultTypes
 from .managefiles import FileManager, EvaluationType
 
+
 from pelican import signals
+from pelican.readers import RstReader
+from uuid import uuid4
 
 import pprint
 
 import os
+
+import logging
+logger = logging.getLogger(__name__)
+from traceback import format_exc
 
 try:
     from ansi2html import Ansi2HTMLConverter
@@ -24,12 +31,61 @@ _SAGE_SETTINGS = {}
 
 _FILE_MANAGER = None
 
-_SAGE_CELL_INSTANCE = None
+# One sage cell instance per source file.
+_SAGE_CELL_INSTANCES = {}
+
+_CONTENT_PATH = None 
+
+# We have to turn pelican into a two pass system if we want to have result
+# interdependencies between files executed correctly, and also for those results
+# to be generated asynchronously.
+
+# The first pass will read each sage code block and populate the database
+# determining the relationships between code blocks, execute the code blocks in
+# the appropriate namespaces (asynchronously), collect up the results, and
+# cache them appropriately.
+
+# The first pass will also determine which files had references to results
+# in other files, and touch them so the result references update correctly
+# during the second pass.
+
+# The second pass will actually use the results for output.
+_PREPROCESSING_DONE = False
+
+def pre_read(generator):
+    global _PREPROCESSING_DONE
+    if _PREPROCESSING_DONE:
+        return
+    else:
+        _PREPROCESSING_DONE = True
+
+    rst_reader = RstReader(generator.settings)
+
+    logger.info("Sage pre-processing files from the content directory")
+    files = [article_file for article_file in 
+                generator.get_files(
+                generator.settings['ARTICLE_PATHS'],
+                exclude=generator.settings['ARTICLE_EXCLUDES'])]
+    for f in files:
+        path = os.path.abspath(os.path.join(generator.path,f))
+        article = generator.readers.get_cached_data(path, None)
+        if article is None:
+            _, ext = os.path.splitext(os.path.basename(path))
+            fmt = ext[1:]
+            try:
+                if fmt.lower() == 'rst':
+                    rst_reader.read(path)
+            except:# Exception as e:
+                logger.exception('Could not process {}\n{}'.format(f, format_exc()))
+                continue
+    # Reset the src order lookup table
+    SageDirective._src_order = defaultdict(lambda : 0) 
+    logger.info("Sage processing completed.")
 
 def sage_init(pelicanobj):
 
     global _FILE_MANAGER
-    global _SAGE_CELL_INSTANCE
+    global _SAGE_CELL_INSTANCES
 
     try:
         settings = pelicanobj.settings['SAGE']
@@ -38,7 +94,6 @@ def sage_init(pelicanobj):
 
     process_settings(pelicanobj, settings)
 
-    _SAGE_CELL_INSTANCE = SageCell(_SAGE_SETTINGS['CELL_URL'])
     _FILE_MANAGER = FileManager(location=_SAGE_SETTINGS['DB_PATH'],
                                 base_path=_SAGE_SETTINGS['FILE_BASE_PATH'])
 
@@ -49,11 +104,13 @@ def merge_dict(k, d1, d2, transform=None):
 def process_settings(pelicanobj, settings):
 
     global _SAGE_SETTINGS
+    global _CONTENT_PATH
 
     # Default settings
     _SAGE_SETTINGS['CELL_URL'] = 'http://sagecell.sagemath.org'
     _SAGE_SETTINGS['FILE_BASE_PATH'] = os.path.join(pelicanobj.settings['OUTPUT_PATH'], 'images/sage')
     _SAGE_SETTINGS['DB_PATH'] = ':memory:'
+    _CONTENT_PATH = pelicanobj.settings['PATH']
 
 
     # Alias for merge_dict
@@ -71,6 +128,25 @@ def process_settings(pelicanobj, settings):
 
 def _define_choice(choice1, choice2):
     return lambda arg : directives.choice(arg, (choice1, choice2))
+
+def _get_source(directive):
+    doc = directive.state_machine.document
+    src = doc.source or doc.current_source
+    return src
+
+def _detect_filename(path, src):
+
+    if len(path.split('||'))!=2:
+        # The user is not passing path + identifier
+        # so we have to relate it back to the current file
+        path = '%s||%s' % (src.replace(_CONTENT_PATH,''),path)
+
+        if path.startswith('/'):
+            path = path[1:]
+
+    return path
+
+_ASSIGNED_UUIDS = {}
 
 class SageDirective(CodeBlock):
     """ Embed a sage cell server into posts.
@@ -94,17 +170,13 @@ class SageDirective(CodeBlock):
     final_argument_whitespace = False
     has_content = True
 
-    def __init__(self, *args, **kwargs):
-        global _SAGE_CELL_INSTANCE
-        super(SageDirective, self).__init__(*args, **kwargs)
-        self._cell = _SAGE_CELL_INSTANCE    
-
-    option_spec = { 'method'           : _define_choice('static', 'dynamic'),
-                    'suppress_code'    : directives.flag,
-                    'suppress_results' : directives.flag,
-                    'suppress_images'  : directives.flag,
-                    'suppress_streams' : directives.flag,
-                    'suppress_errors'  : directives.flag
+    option_spec = { 'id'               : str,
+                    'method'           : _define_choice('static', 'dynamic'),
+                    'suppress-code'    : directives.flag,
+                    'suppress-results' : directives.flag,
+                    'suppress-images'  : directives.flag,
+                    'suppress-streams' : directives.flag,
+                    'suppress-errors'  : directives.flag
                     }
 
     option_spec.update(CodeBlock.option_spec)
@@ -113,9 +185,10 @@ class SageDirective(CodeBlock):
         preamble = 'CODE ID # %(code_id)s:<br/>' if code_id else ''
         id_attribute = ' id="code_block_%(code_id)s"' if code_id else ''
         template = '%s<pre%s>%%(content)s</pre>' % (preamble, id_attribute)
+        uuid = uuid4()
         return nodes.raw('',
-                         template % {'code_id' : code_id, 
-                                     'content' : content}, 
+                template % {'code_id' : code_id, 
+                            'content' : content}, 
                          format='html')
 
     def _check_suppress(self, name):
@@ -177,6 +250,37 @@ class SageDirective(CodeBlock):
         for order, result in enumerate(results):
             pr_table[result.type](code_id, result, order)
 
+    def _get_source(self):
+        return _get_source(self)
+
+    def _get_sage_instance(self):
+        global _SAGE_CELL_INSTANCES
+        src = self._get_source()
+
+        if src in _SAGE_CELL_INSTANCES:
+            return _SAGE_CELL_INSTANCES[src]
+
+        _SAGE_CELL_INSTANCES[src] = SageCell(_SAGE_SETTINGS['CELL_URL'])
+
+        return _SAGE_CELL_INSTANCES[src]
+
+    def _get_results(self, code_obj):
+        # We need to evaluate all prior code blocks which have not been
+        # evaluated.
+
+        chain = _FILE_MANAGER.get_code_block_chain(code_obj)
+
+        if code_obj.last_evaluated is None:
+            cell = self._get_sage_instance()
+            resp = cell.execute_request(code_obj.content)
+            _FILE_MANAGER.timestamp_code(code_obj.id)
+            results = cell.get_results_from_response(resp)
+            self._process_results(code_obj.id, results)
+
+        results = code_obj.results
+
+        return results
+
     def run(self):
 
         if not self.arguments:
@@ -191,25 +295,28 @@ class SageDirective(CodeBlock):
 
         # grab the order and bump it up
         
-        doc = self.state_machine.document
-        src = doc.source or doc.current_source
+        src = self._get_source()
         order = self._src_order[src]
         self._src_order[src] = order + 1
+
+        user_id = None
+        if 'id' in self.options:
+            user_id = self.options['id']
 
         code_block = '\n'.join(self.content)
 
         code_obj = _FILE_MANAGER.create_code(code=code_block,
                                              src=src,
-                                             order=order)
+                                             order=order,
+                                             user_id=user_id)
         code_id = code_obj.id
 
-        if code_obj.last_evaluated is None:
-            resp = self._cell.execute_request(code_block)
-            _FILE_MANAGER.timestamp_code(code_obj.id)
-            results = self._cell.get_results_from_response(resp)
-            self._process_results(code_id, results)
-        else:
-            results = code_obj.results
+        print((code_id, src))
+
+        # Here we wait
+        return [nodes.raw('','\n%s\n'%(uuid4(),),format='html')]
+
+        results = self._get_results(code_obj)
 
         if 'suppress_code' not in self.options:
             return_nodes = super(SageDirective, self).run()
@@ -221,15 +328,60 @@ class SageDirective(CodeBlock):
         return return_nodes
 
 class SageImage(Image):
+
+    option_spec = dict(list(Image.option_spec.items()) +
+                       [('file',str), ('order', int)])
+
+    def _get_source(self):
+        return _get_source(self)
     
     def run(self):
-        print("RUNNING THE IMAGE DIRECTIVE:", self.arguments[0])
-        self.arguments[0] = "http://static3.businessinsider.com/image/52cddfb169beddee2a6c2246/the-29-coolest-us-air-force-images-of-the-year.jpg"
-        return super(SageImage, self).run()
+
+        if 'file' in self.options:
+            src = self.options['file']
+            
+            if src.startswith('/'):
+                src = os.path.join(_CONTENT_PATH, src[1:])
+            else:
+                # grab the current directory
+                src_file = self._get_source()
+                # split it out
+                src = os.path.join(os.path.split(src_file)[0], src)
+        else:
+            src = self._get_source()
+
+        src = os.path.join(_CONTENT_PATH, src)
+        src = os.path.abspath(src)
+
+        if _CONTENT_PATH not in src:
+            raise Exception("Source for sage image directive is not relative to"
+                            " the content directory.\n"
+                            "Original Source: %s\n"
+                            "File path after substitution: %s" % 
+                            (self._get_source(), src))
+
+        src = src.replace(_CONTENT_PATH, '')
+
+        user_id = ':'.join((src, self.arguments[0]))
+
+        code_obj = _FILE_MANAGER.get_code(user_id=user_id)
+
+        
+        return []
+
+
+        results = code_obj.results
+
+        order = self.options.get('order', None)
+
+        if order is None:
+            image = next(filter(lambda x: x.type == ResultTypes.Image, results), None)
+
+        return [_transform_image(self, code_obj.id, image, image.order)]
+
 
 def register():
     directives.register_directive('sage', SageDirective)
     directives.register_directive('sage-image', SageImage)
+    signals.article_generator_preread.connect(pre_read)
     signals.initialized.connect(sage_init)
-    # I don't believe we need to connect to the content_object_init
-    # as we handle this in the directive... revisit.
