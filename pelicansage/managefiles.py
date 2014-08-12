@@ -1,8 +1,7 @@
-import sqlite3
 import sqlalchemy
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Table, Column, Integer, String, ForeignKey
 from sqlalchemy.types import DateTime
-from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.orm import sessionmaker, relationship, mapper
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.engine.reflection import Inspector
 
@@ -29,6 +28,14 @@ class EvaluationType(Base, BaseMixin):
     id = Column(Integer, primary_key=True)
     name = Column(String, unique=True)
 
+class SrcReference(Base):
+    __tablename__ = 'SrcReference'
+    src_id1 = Column(Integer, ForeignKey('Src.id'), primary_key=True)
+    src_id2 = Column(Integer, ForeignKey('Src.id'), primary_key=True)
+
+    src1 = relationship('Src', primaryjoin='(Src.id == SrcReference.src_id1)')
+    src2 = relationship('Src', primaryjoin='(Src.id == SrcReference.src_id2)')
+
 class Src(Base, BaseMixin):
     __tablename__ = 'Src'
     id = Column(Integer, primary_key=True)
@@ -37,29 +44,8 @@ class Src(Base, BaseMixin):
     code_blocks = relationship('CodeBlock', backref='Src',
                                 cascade='save-update, merge, delete')
 
-class SrcReference(Base):
-    """
-    This relationship is src1 makes reference to src2.
-
-    So if src2 is updated, then src1 must be touched so it
-    can be updated.
-    """
-    __tablename__ = 'SrcReferences'
-    id = Column(Integer, primary_key=True)
-    src_id1 = Column(Integer, ForeignKey('Src.id'),nullable=False)
-    src_id2 = Column(Integer, ForeignKey('Src.id'),nullable=False)
-
-class SrcInclude(Base):
-    """
-    This relationship is much like the reference, but with a different
-    implication.  Each code block from the src1 is first run
-    in a new namespace before running the blocks that occur in src2
-    in the same namespace.
-    """
-    __tablename__ = 'SrcIncudes'
-    id = Column(Integer, primary_key=True)
-    src_id1 = Column(Integer, ForeignKey('Src.id'),nullable=False)
-    src_id2 = Column(Integer, ForeignKey('Src.id'),nullable=False)
+    references = relationship('SrcReference', 
+                              primaryjoin=(id == SrcReference.src_id2))
 
 class CodeBlock(Base, BaseMixin):
     __tablename__ = 'CodeBlock'
@@ -100,7 +86,6 @@ class StreamResult(Base, BaseMixin):
 class FileResult(Base, BaseMixin):
     __tablename__ = 'FileResult'
     id = Column(Integer, primary_key=True)
-    file_location = Column(String)
     file_name = Column(String)
     order = Column(Integer)
     code_id = Column(Integer, ForeignKey('CodeBlock.id'), nullable=False)
@@ -119,7 +104,6 @@ class ErrorResult(Base, BaseMixin):
 class FileManager(object):
 
     def __init__(self, location=None, base_path=None, db_name=None, io=None):
-
         self.io = pelicansageio if io is None else io
 
         # Throw away results after each computation of pelican pages
@@ -132,6 +116,7 @@ class FileManager(object):
         self._engine = sqlalchemy.create_engine('sqlite:///' + self.location)
 
         self._session = sessionmaker(bind=self._engine)()
+        _SESSION = self._session
 
         self._base_path = base_path
 
@@ -154,6 +139,35 @@ class FileManager(object):
         
         self._session.commit()
 
+    def commit(self):
+        self._session.commit()
+    
+
+    def get_unevaluated_codeblocks(self):
+        """
+        Returns a list of lists of code blocks which require evalution.
+
+        Each sub-list represents invidual blocks that should be evaluated
+        in the same namespace sequentially with results collected and
+        correlated to each block.  
+
+        Each sublist likely represents the blocks contained within or 
+        referenced by a code block.
+
+        However, each sub-list can be evaluated asynchronously.
+        """
+        srcs = self._session.query(Src).join(CodeBlock).filter(CodeBlock.last_evaluated==None).all()
+
+        blocks = [src.code_blocks for src in srcs]
+
+        def flatten(l):
+            return [item for sublist in l for item in sublist]
+
+        refs = flatten([src.references for src in srcs])
+
+        return blocks, refs
+
+
     def create_reference(self, src1, src2):
 
         src1_obj = self.create_src(src1)
@@ -166,6 +180,8 @@ class FileManager(object):
 
         if src_ref_obj is None:
             src_ref_obj = SrcReference(src_id1=src1_obj.id, src_id2=src2_obj.id)
+            self._session.add(src_ref_obj)
+            self._session.flush()#self._session.commit()
 
         return src_ref_obj
 
@@ -178,7 +194,7 @@ class FileManager(object):
             # Add the src object
             src_obj = Src(src=src)
             self._session.add(Src(src=src))
-            self._session.commit()
+            self._session.flush()#self._session.commit()
             src_obj = self._session.query(Src).filter_by(src=src).first()
 
         return src_obj
@@ -201,7 +217,7 @@ class FileManager(object):
                     # So 'last tag remaining' wins.
                     fetch.user_id = None
                     self._session.add(fetch)
-                    self._session.commit()
+                    self._session.flush()#self._session.commit()
 
         src_obj = self.create_src(src)
 
@@ -214,16 +230,38 @@ class FileManager(object):
                               user_id=user_id,
                               order=order)
         elif fetch.content != code:
-			# We remove all code blocks for that source
+
+            # We will need to regenerate results for this source file
+            code_blocks_in_src = self._session.query(CodeBlock).filter(CodeBlock.src_id == fetch.src_id).all()
+
+            for code_obj in code_blocks_in_src:
+
+                code_id = code_obj.id
+
+                if self._base_path is not None:
+                    file_location_path = self.io.join(self._base_path, str(code_id))
+                    self.io.delete_directory(file_location_path)
+
+                for table in (StreamResult, ErrorResult, FileResult):
+                    query = self._session.query(table).filter(table.code_id==code_id)
+
+                    query.delete()
+
+            # get all id's for the source
+
+            # We remove all code blocks for that source
             self._session.query(CodeBlock).filter(CodeBlock.src_id==src_obj.id,
                                                   CodeBlock.order > fetch.order).delete()
+
+
             self._session.commit()
-			
+            
             fetch.content=code
+            fetch.user_id = user_id
             fetch.last_evaluated = None
 
         self._session.add(fetch)
-        self._session.commit()
+        self._session.flush()#self._session.commit()
         self._session.refresh(fetch)
 
         return fetch
@@ -236,15 +274,18 @@ class FileManager(object):
 
         self._session.add(fetch)
 
-        self._session.commit()
+        self._session.flush()#self._session.commit()
 
-    def get_code(self, code_id=None, user_id=None):
+    def get_code(self, code_id=None, user_id=None, src=None):
 
-        if code_id is None and user_id is None:
-            raise TypeError("Must provide either code_id or user_id")
+        if src is not None and user_id is not None:
         
-        if user_id:
-            return self._session.query(CodeBlock).filter_by(user_id=user_id).first()
+            src_obj = self.create_src(src)
+
+            fetch = self._session.query(CodeBlock).filter_by(user_id=user_id,
+                                                             src_id=src_obj.id).first()
+
+            return fetch
 
         return self._session.query(CodeBlock).filter_by(id=code_id).first()
 
@@ -254,7 +295,7 @@ class FileManager(object):
         code_obj.last_evaluated = datetime.now()
 
         self._session.add(code_obj)
-        self._session.commit()
+        self._session.flush()#self._session.commit()
 
     def get_code_block_chain(self, code_obj):
 
@@ -268,7 +309,7 @@ class FileManager(object):
         result = StreamResult(result=result_text, code_id=code_id, order=order)
 
         self._session.add(result)
-        self._session.commit()
+        self._session.flush()#self._session.commit()
 
         return result
 
@@ -292,13 +333,12 @@ class FileManager(object):
             self.io.download_file(url, file_location)
 
         file_result = FileResult(code_id=code_id,
-                                 file_location=file_location if file_location else file_name,
                                  file_name=file_name,
-				 order=order)
+                                 order=order)
 
         self._session.add(file_result)
 
-        self._session.commit()
+        self._session.flush()#self._session.commit()
 
         return file_result
 
@@ -316,4 +356,4 @@ class FileManager(object):
                                    traceback=traceback,
                                    order=order)
         self._session.add(error_result)
-        self._session.commit()
+        self._session.flush()#self._session.commit()

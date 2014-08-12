@@ -14,7 +14,7 @@ class TestFileManager(unittest.TestCase):
         code = "xx"
         code_obj = manager.create_code(user_id='stuff', code=code, src='A.rst', order=1)
 
-        code_obj_2 = manager.get_code(user_id='stuff')
+        code_obj_2 = manager.get_code(src='A.rst', user_id='stuff')
         self.assertEquals(code_obj_2.content, code)
 
         code_obj_2 = manager.get_code(code_id=code_obj.id)
@@ -52,7 +52,7 @@ class TestFileManager(unittest.TestCase):
 
         file_obj = manager.create_file(code_obj.id, url, 'xxx.png')
         verify = [(file_obj.id, 'xxx.png')]
-        self.assertEquals([(fileobj.id, fileobj.file_location) 
+        self.assertEquals([(fileobj.id, fileobj.file_name) 
                             for fileobj in manager.get_files(code_obj.id)],
                           verify)
 
@@ -60,8 +60,10 @@ class TestFileManager(unittest.TestCase):
 
         file_obj_2 = manager.create_file(code_obj.id, url, 'xxx2.png')
 
+        manager.commit()
+
         verify.append((file_obj_2.id, 'xxx2.png'))
-        self.assertEquals([(fileobj.id, fileobj.file_location) 
+        self.assertEquals([(fileobj.id, fileobj.file_name) 
                             for fileobj in manager.get_files(code_obj.id)],
                           verify)
 
@@ -83,6 +85,8 @@ class TestFileManager(unittest.TestCase):
 
         result_obj_3 = manager.create_result(code_obj_2.id, 'yyy', 1)
 
+        manager.commit()
+
         verify.append((result_obj_2.id, 'yyy'))
         self.assertEquals([(x.id, x.data) for x in manager.get_results(code_obj.id)],
                           verify)
@@ -94,6 +98,32 @@ class TestFileManager(unittest.TestCase):
 
         self.assertEquals(manager.get_results(code_obj_2.id), [])
 
+    def test_reference(self):
+        manager = FileManager()
+
+        src1 = 'a.rst'
+        src2 = 'b.rst'
+        src3 = 'c.rst'
+
+        src_ref_obj = manager.create_reference(src1, src2)
+
+        src1_obj = manager.create_src(src1)
+        src2_obj = manager.create_src(src2)
+
+        self.assertEqual([srcref.src2.src for srcref in src1_obj.references],
+                         [src2])
+
+        self.assertEqual(src1_obj.references[0].src2.src, src2_obj.src)
+        
+        src_ref_obj = manager.create_reference(src1, src3)
+
+        manager.commit()
+
+        self.assertEqual(len(src1_obj.references),2)
+
+        self.assertEqual([srcref.src2.src for srcref in src1_obj.references],
+                         [src2,src3])
+
     def test_timestamp(self):
         src = 'a.rst'
         order = 1
@@ -101,7 +131,8 @@ class TestFileManager(unittest.TestCase):
 
         class dummy_io(object):
             class datetime_dummy(object):
-                now = lambda self : datetime(year=2014,day=1,month=1)
+                def now(self):
+                    return datetime(year=2014,day=1,month=1)
 
             datetime = datetime_dummy()
 

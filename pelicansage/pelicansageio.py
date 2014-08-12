@@ -37,6 +37,13 @@ if sys.version_info.major == 3:
 else:
     to_bytes = str
 
+def delete_directory(path):
+    shutil.rmtree(path, ignore_errors=True)
+
+def touch_file(path):
+    with open(path, 'a'):
+        os.utime(path, None)
+
 # Accepted answer,
 # http://stackoverflow.com/questions/600268/mkdir-p-functionality-in-python 
 def create_directory_tree(path):

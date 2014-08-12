@@ -36,8 +36,13 @@ class SageCell(object):
         # if there is a terms of service agreement, you need to
         # indicate acceptance in the data parameter below (see the API docs)
         self.req = self.io.Request(url=url+'kernel',
-			           data=self.io.to_bytes('accepted_tos=true'),
-				   headers={'Accept': 'application/json'})
+                       data=self.io.to_bytes('accepted_tos=true'),
+                   headers={'Accept': 'application/json'})
+
+        self.reset()
+
+    
+    def reset(self):
 
         self._running = False
 
@@ -105,11 +110,11 @@ class SageCell(object):
                             'parent_header':{},
                             'metadata': {},
                             'content': {'code': code, 
-								        'silent': False, 
-										'store_history' : store_history,
-										'user_variables': [], 
-										'user_expressions': {'_sagecell_files': 'sys._sage_.new_files()'}, 
-										'allow_stdin': False}}
+                                        'silent': False, 
+                                        'store_history' : store_history,
+                                        'user_variables': [], 
+                                        'user_expressions': {'_sagecell_files': 'sys._sage_.new_files()'}, 
+                                        'allow_stdin': False}}
 
         return json.dumps(execute_request)
 
@@ -178,7 +183,7 @@ class SageCell(object):
 
         kernel_url = response['kernel_url']
         iopub = response['iopub']
-        file_url_base = kernel_url.replace('ws:','https:') + 'files/' 
+        file_url_base = kernel_url.replace('ws:','http:') + 'files/' 
         file_urls = []
 
         # This will give us an ordering index to interleave results / images if we want.
