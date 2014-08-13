@@ -132,12 +132,14 @@ def pre_read(generator):
     unevaled_blocks, references = _FILE_MANAGER.get_unevaluated_codeblocks()
 
     threads = []
+    unique_srcs = set()
     result_queue = Queue()
 
     for blocks in unevaled_blocks:
         if len(blocks) == 0:
             continue
         src = blocks[0].src.src
+        unique_srcs.add(src)
         cell = _SAGE_CELL_INSTANCES[src]
         threads.append(CellWorker(result_queue, blocks, cell))
     
@@ -161,10 +163,14 @@ def pre_read(generator):
     except Empty:
         pass
 
+    for src in unique_srcs:
+        _FILE_MANAGER.compute_permalink(src)
+
     # We are done processing results, commit them to disk
     _FILE_MANAGER.commit()
 
     logger.info("Results downloaded and commited in %.2f seconds.", timeit.default_timer() - start_time)
+
 
     # Find all references which are
     # Preprocessing done

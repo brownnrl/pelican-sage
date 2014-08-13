@@ -7,6 +7,10 @@ from sqlalchemy.engine.reflection import Inspector
 
 from .pelicansageio import pelicansageio
 
+import zlib
+import base64
+import sys
+
 class ResultTypes:
     Image, Stream, Error = range(3)
     ALL_STR = ('image', 'stream', 'error')
@@ -40,6 +44,7 @@ class Src(Base, BaseMixin):
     __tablename__ = 'Src'
     id = Column(Integer, primary_key=True)
     src = Column(String, unique=True)
+    permalink = Column(String)
     
     code_blocks = relationship('CodeBlock', backref='Src',
                                 cascade='save-update, merge, delete')
@@ -56,6 +61,7 @@ class CodeBlock(Base, BaseMixin):
     content = Column(String)
     eval_type_id = Column(Integer, ForeignKey('EvaluationType.id'),default=1)
     last_evaluated = Column(DateTime)
+    permalink = Column(String)
 
     src = relationship('Src', backref='Src')
     stream_results = relationship('StreamResult', backref='CodeBlock',
@@ -185,8 +191,6 @@ class FileManager(object):
 
         return src_ref_obj
 
-
-
     def create_src(self, src):
         src_obj = self._session.query(Src).filter_by(src=src).first()
 
@@ -198,6 +202,40 @@ class FileManager(object):
             src_obj = self._session.query(Src).filter_by(src=src).first()
 
         return src_obj
+
+    def compute_permalink(self, src):
+        src_obj = self.create_src(src)
+
+        blocks = src_obj.code_blocks
+
+        if len(blocks) == 0:
+            return
+
+        code = ''
+        code += "html('<h1>Code from cool place.</h1><br/><hr/><br>')\n"
+        code += ("\nhtml('<br/><hr/><br/>')\n#" + '-'*40 + "\n").join([block.content for block in blocks])
+
+        def gen_permalink(content):
+
+            if sys.version_info[0] > 2:
+                content = bytes(code, 'UTF-8')
+
+            permalink = base64.urlsafe_b64encode(zlib.compress(content))
+
+            if sys.version_info[0] > 2:
+                permalink = permalink.decode('UTF-8')
+
+            return permalink
+
+        src_obj.permalink = gen_permalink(code)
+
+        self._session.add(src_obj)
+
+        for block in blocks:
+            block.permalink = gen_permalink(block.content)
+            self._session.add(block)
+
+        self._session.flush()
 
     def create_code(self, code, src, order, user_id=None):
         # check for an exisiting user id
