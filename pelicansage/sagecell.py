@@ -22,7 +22,7 @@ SageImage = NT('SageImage', 'file_name url')
 
 CR = CellResult
 
-class SageCell(object):
+class BaseClient(object):
     def __init__(self, url, timeout=10, io=None):
 
         self.io = pelicansageio if io is None else io
@@ -31,20 +31,20 @@ class SageCell(object):
             url+='/'
         self.url = url
         self.timeout = timeout
-
-        # POST or GET <url>/kernel
-        # if there is a terms of service agreement, you need to
-        # indicate acceptance in the data parameter below (see the API docs)
-        self.req = self.io.Request(url=url+'kernel',
-                       data=self.io.to_bytes('accepted_tos=true'),
-                   headers={'Accept': 'application/json'})
+        
+        self.req = None
 
         self.reset()
-
     
     def reset(self):
 
         self._running = False
+
+    def _code_keepalive(self, code):
+        return code
+
+    def _get_kernel_url(self, response):
+        raise NotImplemented()
 
     def execute_request(self, code, store_history=False):
         # zero out our list of messages, in case this is not the first request
@@ -56,22 +56,23 @@ class SageCell(object):
             # RESPONSE: {"id": "ce20fada-f757-45e5-92fa-05e952dd9c87", "ws_url": "ws://localhost:8888/"}
             # construct the iopub and shell websocket channel urls from that
 
-            self.kernel_url = response['ws_url']+'kernel/'+response['id']+'/'
+            self.kernel_url = self._get_kernel_url(response)
             websocket.setdefaulttimeout(self.timeout)
             self._shell = websocket.create_connection(self.kernel_url+'shell')
             self._iopub = websocket.create_connection(self.kernel_url+'iopub')
 
             self._running = True
 
-            # we also require an interact to keep the kernel alive
-            code = "interact(lambda : None)\n%s" % (code,)
-
+            code = self._code_keepalive(code)
 
         self.shell_messages = []
         self.iopub_messages = []
 
+        self._shell.send(self._make_kernel_info_request())
+
         # Send the JSON execute_request message string down the shell channel
         msg = self._make_execute_request(code, store_history)
+
         self._shell.send(msg)
             
         # We use threads so that we can simultaneously get the messages on both channels.
@@ -102,21 +103,22 @@ class SageCell(object):
             if msg['header']['msg_type'] == 'status' and msg['content']['execution_state'] == 'idle':
                 break
 
-    def _make_execute_request(self, code, store_history=False):
+    def _make_request(self, msg_type, content):
         message = str(uuid4())
 
         # Here is the general form for an execute_request message
-        execute_request = {'header': {'msg_type': 'execute_request', 'msg_id': message, 'username': '', 'session': self.session},
+        request = {'header': {'msg_type': msg_type, 'msg_id': message, 'username': '', 'session': self.session},
                             'parent_header':{},
                             'metadata': {},
-                            'content': {'code': code, 
-                                        'silent': False, 
-                                        'store_history' : store_history,
-                                        'user_variables': [], 
-                                        'user_expressions': {'_sagecell_files': 'sys._sage_.new_files()'}, 
-                                        'allow_stdin': False}}
+                            'content': content}
 
-        return json.dumps(execute_request)
+        return json.dumps(request)
+
+    def _make_kernel_info_request(self):
+        return self._make_request('kernel_info_request', {})
+
+    def _make_execute_request(self, code, store_history=False):
+        return self._make_request('execute_request', {})
 
     def close(self):
         # If we define this, we can use the closing() context manager to automatically close the channels
@@ -199,7 +201,57 @@ class SageCell(object):
                     file_urls.append(CR(ResultTypes.Image, message_index, SageImage(node, file_url_base + node)))
 
         return file_urls
-        
+
+class SageCell(BaseClient):
+
+    def __init__(self, *args, **kwargs):
+        super(SageCell,self).__init__(*args, **kwargs)
+
+        # POST or GET <url>/kernel
+        # if there is a terms of service agreement, you need to
+        # indicate acceptance in the data parameter below (see the API docs)
+        self.req = self.io.Request(url=self.url+'kernel',
+                       data=self.io.to_bytes('accepted_tos=true'),
+                       headers={'Accept': 'application/json'})
+
+    def _make_execute_request(self, code, store_history=False):
+        content = {'code': code, 
+                   'silent': False, 
+                   'store_history' : store_history,
+                   'user_variables': [], 
+                   'user_expressions': {'_sagecell_files': 'sys._sage_.new_files()'}, 
+                   'allow_stdin': False}
+        return self._make_request('execute_request', content)
+
+    def _code_keepalive(self, code):
+        # we also require an interact to keep the kernel alive
+        return "interact(lambda : None)\n" + code
+
+    def _get_kernel_url(self, response):
+        return response['ws_url']+'kernel/'+response['id']+'/'
+
+class IHaskellClient(BaseClient):
+
+    def __init__(self, *args, **kwargs):
+        super(IHaskellClient, self).__init__(*args, **kwargs)
+
+        self.req = self.io.Request(method="POST",url=self.url+'api/kernels',
+                                   headers={'Accept': 'application/json'})
+
+
+    def _make_execute_request(self, code, store_history=False):
+        content = {'code': code, 
+                   'silent': False, 
+                   'store_history' : store_history,
+                   'user_variables': [], 
+                   'user_expressions': {}, 
+                   'allow_stdin': False}
+        return self._make_request('execute_request', content)
+
+    def _get_kernel_url(self, response):
+        url = self.url.replace('http','ws') + 'api/kernels/' + response['id'] + '/'
+
+        return url
 
 
 def traverse_down(collection, *args):
@@ -215,32 +267,11 @@ def traverse_down(collection, *args):
 def main():
     import sys
     # argv[1] is the web address
-    a=SageCell(sys.argv[1])
+    a=IHaskellClient('http://localhost:8080', timeout=5)
     import pprint
     result = a.execute_request("""
-from pylab import *
-
-x = 'hello world from x'
-t = arange(0.0, 2.0, 0.01)
-s = sin(2*pi*t)
-plot(t, s)
-
-xlabel('time (s)')
-ylabel('voltage (mV)')
-title('About as simple as it gets, folks')
-grid(True)
-#savefig("test.png")
-show()
-#factorial(2012)
+putStrLn "Hello."
 """)
-    pprint.pprint(result)
-    grab_images(result)
-    result = a.execute_request("""
-print "hello world"
-print x
-""")
-    print("\n\nSECOND RESULT\n\n")
-    pprint.pprint(result)
     return result 
 
 if __name__ == "__main__":

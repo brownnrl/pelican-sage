@@ -212,13 +212,12 @@ class FileManager(object):
             return
 
         code = ''
-        code += "html('<h1>Code from cool place.</h1><br/><hr/><br>')\n"
         code += ("\nhtml('<br/><hr/><br/>')\n#" + '-'*40 + "\n").join([block.content for block in blocks])
 
         def gen_permalink(content):
 
             if sys.version_info[0] > 2:
-                content = bytes(code, 'UTF-8')
+                content = bytes(content, 'UTF-8')
 
             permalink = base64.urlsafe_b64encode(zlib.compress(content))
 

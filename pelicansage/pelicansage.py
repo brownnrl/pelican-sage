@@ -28,9 +28,9 @@ from traceback import format_exc
 
 try:
     from ansi2html import Ansi2HTMLConverter
-    ansi_converter = Ansi2HTMLConverter().convert
+    ansi_converter = lambda x : Ansi2HTMLConverter().convert(x, full=False)
 except ImportError:
-    ansi_converter = lambda x : '<pre>%s</pre>' % (x,)
+    ansi_converter = lambda x : str(x) 
 
 _SAGE_SETTINGS = {}
 
@@ -246,7 +246,8 @@ def process_settings(pelicanobj, settings):
     global _CONTENT_PATH
 
     # Default settings
-    _SAGE_SETTINGS['CELL_URL'] = 'http://sagecell.sagemath.org'
+    _SAGE_SETTINGS['CELL_URL'] = ['http://sagecell.sagemath.org']
+    _SAGE_SETTINGS['PUBLIC_CELL'] = 'http://sagecell.sagemath.org'
     _SAGE_SETTINGS['FILE_BASE_PATH'] = os.path.join(pelicanobj.settings['OUTPUT_PATH'], 'images/sage')
     _SAGE_SETTINGS['DB_PATH'] = ':memory:'
     _CONTENT_PATH = pelicanobj.settings['PATH']
@@ -262,6 +263,7 @@ def process_settings(pelicanobj, settings):
 
     if settings is not None:
         md('CELL_URL')
+        md('PUBLIC_CELL')
         md('FILE_BASE_PATH')
         md('DB_PATH', transform_content_db)
 
@@ -273,30 +275,72 @@ def _get_source(directive):
     src = doc.source or doc.current_source
     return src
 
-def _detect_filename(path, src):
-
-    if len(path.split('||'))!=2:
-        # The user is not passing path + identifier
-        # so we have to relate it back to the current file
-        path = '%s||%s' % (src.replace(_CONTENT_PATH,''),path)
-
-        if path.startswith('/'):
-            path = path[1:]
-
-    return path
-
 _ASSIGNED_UUIDS = {}
 
 def _image_location(code_id, file_name):
     return '/images/sage/%s/%s' % (code_id, file_name)
 
-def _transform_pre(content, code_id=None):
-    id_attribute = ' id="code_block_%(code_id)s"' if code_id else ''
-    template = '<pre%s>%%(content)s</pre>' % (id_attribute,)
+def _transform_pre(content, id=None, class_=None):
+    id_attribute = ' id="%(id)s"' if id else ''
+    class_attribute = ' class="%(class_)s"' if class_ else ''
+    template = '<code><pre%s%s>%%(content)s</pre></code>' % (id_attribute,
+                                                class_attribute)
     return nodes.raw('',
-            template % {'code_id' : code_id, 
+            template % {'id' : id, 
+                        'class_' : class_,
                         'content' : content}, 
                      format='html')
+
+def _mod_format_permalinks(code_obj):
+    if code_obj is None:
+        return ''
+
+    link_template = '<a href="%s/?z=%%s">%%s</a>' % ( 
+                    _SAGE_SETTINGS['PUBLIC_CELL'],)
+
+    return """
+<div class='permalinks'>
+%s
+%s
+</div>
+""" % ('' if not code_obj.permalink else link_template % (code_obj.permalink,'blk'),
+       '' if not code_obj.src.permalink else link_template % (code_obj.src.permalink,'src'))
+
+def _mod_transform_result(code_id, result, order):
+    code_obj = _FILE_MANAGER.get_code(code_id)
+    permalink = ''
+    src_permalink=''
+    if code_obj:
+        permalink = code_obj.permalink
+        src_permalink = code_obj.src.permalink
+    return nodes.raw('',
+"""
+<div class="code_block out_block">
+<div class='watermark'>[out %(order)s]</div>
+<pre>%(result)s</pre>
+%(links)s
+</div>
+"""%{'result' : result,
+     'order' : code_obj.order + 1,
+     'links' : _mod_format_permalinks(code_obj)},format='html')
+
+def _mod_transform_image(code_id, image, order):
+    code_obj = _FILE_MANAGER.get_code(code_id)
+    if not isinstance(image, nodes.image):
+        image = nodes.raw('',"<span><img src='%s'/></span>"%(_image_location(code_id, image.data.file_name),), format='html')
+
+    print(image)
+    print(type(image))
+
+    outer = nodes.container('',
+                        nodes.raw('',
+                                      "<div class='watermark'>[out %s]</div>" % (code_obj.order+1,),
+                                      format='html'),
+                            classes=['code_block'])
+    outer += image 
+    outer += nodes.raw('',
+                       _mod_format_permalinks(code_obj), format='html'),
+    return outer
 
 class SageDirective(CodeBlock):
     " Embed a sage cell server evaluation into posts."
@@ -317,9 +361,6 @@ class SageDirective(CodeBlock):
 
     option_spec.update(CodeBlock.option_spec)
 
-    def _create_pre(self, content, code_id=None):
-        return _transform_pre(content, code_id)
-
     def _check_suppress(self, name):
         for key in ('suppress-results', 'suppress-' + name):
             if key in self.options:
@@ -328,17 +369,15 @@ class SageDirective(CodeBlock):
         return False
 
     def _transform_error(self, code_id, error, order):
-        return nodes.raw('',
-                         ansi_converter(error.data.traceback),
-                         format='html')
+        return _mod_transform_result(code_id, ansi_converter(error.data.traceback), order)
 
     
     def _transform_stream(self, code_id, stream, order):
-        return self._create_pre(stream.data)
+        return _mod_transform_result(code_id, stream.data, order)
 
 
     def _transform_image(self, code_id, image, order):
-        return nodes.image(uri=_image_location(code_id, image.data.file_name))
+        return _mod_transform_image(code_id, image, order)
 
     def _transform_results(self, code_id, results):
 
@@ -414,6 +453,15 @@ class SageDirective(CodeBlock):
 
         if 'suppress_code' not in self.options:
             return_nodes = super(SageDirective, self).run()
+            outer = nodes.container('',
+                                    nodes.raw('',
+                                              "<div class='watermark'>[in %s]</div>" % (code_obj.order+1,),
+                                              format='html'),
+                                    classes=['code_block', 'in_block'])
+            outer += return_nodes[0]
+            outer += nodes.raw('',
+                               _mod_format_permalinks(code_obj), format='html'),
+            return_nodes = [outer]
         else:
             return_nodes = []
 
@@ -520,7 +568,7 @@ class SageResult(SageResultMixin, Directive):
 
         code_obj, result = result
 
-        return [_transform_pre(result.data, code_obj.id)]
+        return [_mod_transform_result(code_obj.id, result.data, result.order)]
 
 class SageImage(SageResultMixin, Image):
 
@@ -540,7 +588,7 @@ class SageImage(SageResultMixin, Image):
 
         self.arguments[0] = _image_location(code_obj.id, result.file_name)
 
-        return super(SageImage, self).run()
+        return [_mod_transform_image(code_obj.id, super(SageImage, self).run()[0], result.order)]
 
 
 def register():
