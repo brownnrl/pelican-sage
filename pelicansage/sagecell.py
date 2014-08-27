@@ -16,6 +16,8 @@ from .managefiles import ResultTypes
 from collections import namedtuple as NT
 from itertools import groupby
 
+import pprint
+
 CellResult = NT('CellResult', 'type order data')
 SageError = NT('SageError', 'ename evalue traceback')
 SageImage = NT('SageImage', 'file_name url')
@@ -30,9 +32,11 @@ class BaseClient(object):
         if not url.endswith('/'):
             url+='/'
         self.url = url
+        self.req_ses = None
         self.timeout = timeout
         
-        self.req = None
+        self._json_session_info = None
+        self.kernel_id = None
 
         self.reset()
     
@@ -43,23 +47,31 @@ class BaseClient(object):
     def _code_keepalive(self, code):
         return code
 
-    def _get_kernel_url(self, response):
+    def _get_terminate_command(self):
+        return "exit"
+
+    def _create_new_session(self):
         raise NotImplemented()
+
+    def _send_first_message(self):
+        raise NotImplemented()
+
+    def cleanup(self):
+        raise NotImplemented()
+
 
     def execute_request(self, code, store_history=False):
         # zero out our list of messages, in case this is not the first request
         if not self._running:
-            resp = self.io.get_response(self.req)
-            response = json.loads(resp)
-            self.session = str(uuid4())
+            self._create_new_session()
 
             # RESPONSE: {"id": "ce20fada-f757-45e5-92fa-05e952dd9c87", "ws_url": "ws://localhost:8888/"}
             # construct the iopub and shell websocket channel urls from that
 
-            self.kernel_url = self._get_kernel_url(response)
             websocket.setdefaulttimeout(self.timeout)
             self._shell = websocket.create_connection(self.kernel_url+'shell')
             self._iopub = websocket.create_connection(self.kernel_url+'iopub')
+            self._send_first_message()
 
             self._running = True
 
@@ -68,11 +80,9 @@ class BaseClient(object):
         self.shell_messages = []
         self.iopub_messages = []
 
-        self._shell.send(self._make_kernel_info_request())
-
         # Send the JSON execute_request message string down the shell channel
-        msg = self._make_execute_request(code, store_history)
 
+        msg = self._make_execute_request(code, store_history)
         self._shell.send(msg)
             
         # We use threads so that we can simultaneously get the messages on both channels.
@@ -113,6 +123,9 @@ class BaseClient(object):
                             'content': content}
 
         return json.dumps(request)
+
+    def kernel_info(self):
+        return self._make_kernel_info_request()
 
     def _make_kernel_info_request(self):
         return self._make_request('kernel_info_request', {})
@@ -204,15 +217,21 @@ class BaseClient(object):
 
 class SageCell(BaseClient):
 
-    def __init__(self, *args, **kwargs):
-        super(SageCell,self).__init__(*args, **kwargs)
+    def _create_new_session(self):
+        self.req_ses = self.io.requests.Session()
+        s = self.req_ses
+        self.session = str(uuid4())
+        resp = s.post('http://sagecell.sagemath.org/kernel',
+                     data={'accepted_tos':'true'},
+                     headers={'Accept': 'application/json'})
 
-        # POST or GET <url>/kernel
-        # if there is a terms of service agreement, you need to
-        # indicate acceptance in the data parameter below (see the API docs)
-        self.req = self.io.Request(url=self.url+'kernel',
-                       data=self.io.to_bytes('accepted_tos=true'),
-                       headers={'Accept': 'application/json'})
+        resp_json = resp.json()
+        self.kernel_id = resp_json['id']
+        self.session = resp_json['id']
+        self.kernel_url = resp_json['ws_url'] + 'kernel/' + self.kernel_id + '/'
+
+    def _send_first_message(self):
+        return
 
     def _make_execute_request(self, code, store_history=False):
         content = {'code': code, 
@@ -230,14 +249,49 @@ class SageCell(BaseClient):
     def _get_kernel_url(self, response):
         return response['ws_url']+'kernel/'+response['id']+'/'
 
-class IHaskellClient(BaseClient):
+class IPythonNotebookClient(BaseClient):
 
-    def __init__(self, *args, **kwargs):
-        super(IHaskellClient, self).__init__(*args, **kwargs)
+    def _create_new_session(self):
+        self.req_ses = self.io.requests.Session()
+        s = self.req_ses
+        resp_login = s.get(url=self.url+'login',
+                           headers={'Accept': 'application/json'})
 
-        self.req = self.io.Request(method="POST",url=self.url+'api/kernels',
+        resp_new_notebook = s.post(url=self.url+'api/notebooks',
                                    headers={'Accept': 'application/json'})
 
+        resp = resp_new_notebook.json()
+        self.notebook_name = resp['name']
+        self.notebook_path =  resp['path']
+        self._json_session_info ={ 
+                                    'notebook':
+                                    { 
+                                      'name': self.notebook_name,
+                                      'path': self.notebook_path
+                                    }
+                                 }
+        self._json_session_info = json.dumps(self._json_session_info)
+        resp = s.post(url=self.url+'api/sessions',
+                                   data=self._json_session_info,
+                                   headers={'Accept': 'application/json'})
+        
+        resp_json = resp.json()
+        self.kernel_id = resp_json['kernel']['id']
+        self.session = resp_json['id']
+        self.kernel_url = self.url.replace('http:','ws:') + 'api/kernels/' + self.kernel_id + '/'
+
+    def _send_first_message(self):
+        self._shell.send(self.session + ":")
+        self._iopub.send(self.session + ":")
+
+    def cleanup(self):
+        if self._running and self._shell.connected:
+            self._shell.send(self._make_request('shutdown_request', {'restart': False}))
+            self.req_ses.delete(url=self.url+'api/sessions/%s' % (self.session,),
+                                headers={'Accept': 'application/json'})
+            self.req_ses.delete(url=self.url+'api/notebooks',
+                          data=self._json_session_info,
+                          headers={'Accept': 'application/json'})
 
     def _make_execute_request(self, code, store_history=False):
         content = {'code': code, 
@@ -247,12 +301,6 @@ class IHaskellClient(BaseClient):
                    'user_expressions': {}, 
                    'allow_stdin': False}
         return self._make_request('execute_request', content)
-
-    def _get_kernel_url(self, response):
-        url = self.url.replace('http','ws') + 'api/kernels/' + response['id'] + '/'
-
-        return url
-
 
 def traverse_down(collection, *args):
     node = collection
@@ -265,13 +313,27 @@ def traverse_down(collection, *args):
     return node
 
 def main():
-    import sys
-    # argv[1] is the web address
-    a=IHaskellClient('http://localhost:8080', timeout=5)
     import pprint
+    import sys
+    b = SageCell('http://sagecell.sagemath.org/')
+    result = b.execute_request("print 'Hi.'")
+    pprint.pprint(result)
+
+    print("-"*70)
+
+    a=IPythonNotebookClient('http://localhost:8899', timeout=None)
     result = a.execute_request("""
-putStrLn "Hello."
-""")
+print "Hello1."
+""", True)
+    pprint.pprint(result)
+    result = a.execute_request("""
+putStrLn "Hello2."
+""", True)
+    pprint.pprint(result)
+    a.cleanup()
+
+
+
     return result 
 
 if __name__ == "__main__":
