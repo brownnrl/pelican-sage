@@ -1,5 +1,5 @@
 import sqlalchemy
-from sqlalchemy import Table, Column, Integer, String, ForeignKey
+from sqlalchemy import Table, Column, Integer, String, ForeignKey, Enum
 from sqlalchemy.types import DateTime
 from sqlalchemy.orm import sessionmaker, relationship, mapper
 from sqlalchemy.ext.declarative import declarative_base
@@ -17,6 +17,27 @@ class ResultTypes:
     ALL_NUM = [x for x in range(3)]
 
 Base = declarative_base()
+
+MimeType = Enum('text/plain',
+                'text/html',
+                'text/image-filename', 
+                'text/x-python-traceback',
+                'image/png')
+
+LanguagesStrEnum = ('python',
+                   'sage',
+                   'haskell',  
+                   'r',
+                   'octave',
+                   'maxima',
+                   'gap',
+                   'gp')
+
+Platforms = Enum('sage', 'ipython', 'ihaskell', 'ipynb')
+
+FileTypes = Enum('rst', 'ipynb')
+
+Languages = Enum(*LanguagesStrEnum)
 
 class BaseMixin(object):
     @property
@@ -45,12 +66,13 @@ class Src(Base, BaseMixin):
     id = Column(Integer, primary_key=True)
     src = Column(String, unique=True)
     permalink = Column(String)
+    filetype = Column(FileTypes, default='rst')
     
     code_blocks = relationship('CodeBlock', backref='Src',
                                 cascade='save-update, merge, delete')
 
     references = relationship('SrcReference', 
-                              primaryjoin=(id == SrcReference.src_id2))
+                              primaryjoin=(id == SrcReference.src_id1))
 
 class CodeBlock(Base, BaseMixin):
     __tablename__ = 'CodeBlock'
@@ -62,6 +84,8 @@ class CodeBlock(Base, BaseMixin):
     eval_type_id = Column(Integer, ForeignKey('EvaluationType.id'),default=1)
     last_evaluated = Column(DateTime)
     permalink = Column(String)
+    language = Column(Languages)
+    platform = Column(Platforms)
 
     src = relationship('Src', backref='Src')
     stream_results = relationship('StreamResult', backref='CodeBlock',
@@ -82,6 +106,7 @@ class StreamResult(Base, BaseMixin):
     result = Column(String, nullable=True)
     code_id = Column(Integer, ForeignKey('CodeBlock.id'), nullable=False)
     order = Column(Integer)
+    mimetype = Column(MimeType)
 
     @property
     def data(self):
@@ -95,6 +120,7 @@ class FileResult(Base, BaseMixin):
     file_name = Column(String)
     order = Column(Integer)
     code_id = Column(Integer, ForeignKey('CodeBlock.id'), nullable=False)
+    mimetype = Column(MimeType)
     type = ResultTypes.Image
 
 class ErrorResult(Base, BaseMixin):
@@ -106,10 +132,11 @@ class ErrorResult(Base, BaseMixin):
     traceback = Column(String)
     code_id = Column(Integer, ForeignKey('CodeBlock.id'), nullable=False)
     type = ResultTypes.Error
+    mimetype = 'text/x-python-traceback'
 
 class FileManager(object):
 
-    def __init__(self, location=None, base_path=None, db_name=None, io=None):
+    def __init__(self, location=None, base_path=None, db_name=None, io=None, echo_sql=False):
         self.io = pelicansageio if io is None else io
 
         # Throw away results after each computation of pelican pages
@@ -119,7 +146,7 @@ class FileManager(object):
         else:
             self.location = ':memory:'
 
-        self._engine = sqlalchemy.create_engine('sqlite:///' + self.location)
+        self._engine = sqlalchemy.create_engine('sqlite:///' + self.location, echo=echo_sql)
 
         self._session = sessionmaker(bind=self._engine)()
         _SESSION = self._session
@@ -148,6 +175,13 @@ class FileManager(object):
     def commit(self):
         self._session.commit()
     
+    def get_all_codeblocks(self):
+        """
+        Returns all code blocks.
+        """
+        blks = self._session.query(CodeBlock).all()
+
+        return blks
 
     def get_unevaluated_codeblocks(self):
         """
@@ -162,7 +196,9 @@ class FileManager(object):
 
         However, each sub-list can be evaluated asynchronously.
         """
-        srcs = self._session.query(Src).join(CodeBlock).filter(CodeBlock.last_evaluated==None).all()
+        srcs = self._session.query(Src).join(CodeBlock).filter(CodeBlock.last_evaluated==None,
+                                                               CodeBlock.platform != 'ipynb',
+                                                               Src.filetype != 'ipynb').all()
 
         blocks = [src.code_blocks for src in srcs]
 
@@ -194,9 +230,11 @@ class FileManager(object):
     def create_src(self, src):
         src_obj = self._session.query(Src).filter_by(src=src).first()
 
+        ext = self.io.os.path.splitext(src)[1][1:]
+
         if src_obj is None:
             # Add the src object
-            src_obj = Src(src=src)
+            src_obj = Src(src=src, filetype=ext)
             self._session.add(Src(src=src))
             self._session.flush()#self._session.commit()
             src_obj = self._session.query(Src).filter_by(src=src).first()
@@ -236,7 +274,7 @@ class FileManager(object):
 
         self._session.flush()
 
-    def create_code(self, code, src, order, user_id=None):
+    def create_code(self, code, src, order, user_id=None, language='sage', platform='sage'):
         # check for an exisiting user id
 
         if user_id is not None:
@@ -264,6 +302,8 @@ class FileManager(object):
         if fetch is None:
             fetch = CodeBlock(src_id=src_obj.id,
                               content=code,
+                              language=language,
+                              platform=platform,
                               user_id=user_id,
                               order=order)
         elif fetch.content != code:
@@ -341,9 +381,9 @@ class FileManager(object):
 
         code_objects = self._session.query(CodeBlock).filter_by(src_id=code_obj.src.id)
 
-    def create_result(self, code_id, result_text, order=None):
+    def create_result(self, code_id, result_text, order=None, mimetype='text/plain'):
 
-        result = StreamResult(result=result_text, code_id=code_id, order=order)
+        result = StreamResult(result=result_text, code_id=code_id, order=order, mimetype=mimetype)
 
         self._session.add(result)
         self._session.flush()#self._session.commit()
@@ -357,7 +397,7 @@ class FileManager(object):
 
         return code_obj.stream_results
 
-    def create_file(self, code_id, url, file_name, order=None):
+    def create_file(self, code_id, url, file_name, order=None, mimetype=None):
 
         file_location = None
 
@@ -371,7 +411,8 @@ class FileManager(object):
 
         file_result = FileResult(code_id=code_id,
                                  file_name=file_name,
-                                 order=order)
+                                 order=order,
+                                 mimetype=mimetype)
 
         self._session.add(file_result)
 

@@ -3,7 +3,6 @@
 # and uniformly work on python 2/3 for the purposes of this
 # application
 
-
 import os, sys
 import errno
 
@@ -36,6 +35,9 @@ if sys.version_info.major == 3:
     to_bytes = lambda x: bytes(x, 'utf-8')
 else:
     to_bytes = str
+
+def decode_b64_string_and_save(b64_string, path):
+    pass
 
 def delete_directory(path):
     shutil.rmtree(path, ignore_errors=True)

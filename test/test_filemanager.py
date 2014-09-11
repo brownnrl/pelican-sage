@@ -105,10 +105,14 @@ class TestFileManager(unittest.TestCase):
         src2 = 'b.rst'
         src3 = 'c.rst'
 
+
         src_ref_obj = manager.create_reference(src1, src2)
 
         src1_obj = manager.create_src(src1)
         src2_obj = manager.create_src(src2)
+
+        manager.commit()
+
 
         self.assertEqual([srcref.src2.src for srcref in src1_obj.references],
                          [src2])

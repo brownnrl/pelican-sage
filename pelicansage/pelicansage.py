@@ -5,22 +5,26 @@ from docutils import nodes
 from docutils.parsers.rst import directives, Directive
 from docutils.parsers.rst.directives.images import Image
 from docutils.parsers.rst.directives.body import CodeBlock
-from .sagecell import SageCell, ResultTypes
-from .managefiles import FileManager, EvaluationType
-
+from .sagecell import SageCell, IPythonNotebookClient, ResultTypes
+from .managefiles import FileManager, EvaluationType, LanguagesStrEnum
 
 from queue import Queue, Empty
 from threading import Thread
 
+from .util import CellResult as CR, combine_results
+
 from pelican import signals
-from pelican.readers import RstReader
+from pelican.readers import RstReader, BaseReader
 from uuid import uuid4
 
 import pprint
 
-import os
+import os, shutil
+from .pelicansageio import create_directory_tree
 
 import timeit
+
+import json
 
 import logging
 logger = logging.getLogger(__name__)
@@ -45,8 +49,20 @@ def dole_out():
     _last_dole += 1
     return next_cell
 
+def create_cells():
+    cells = {'sage' : SageCell(dole_out())}
+
+    if _SAGE_SETTINGS['IHASKELL_URL']:
+        cells['ihaskell'] = IPythonNotebookClient(_SAGE_SETTINGS['IHASKELL_URL'], timeout=60)
+
+    if _SAGE_SETTINGS['IPYTHON_URL']:
+        cells['ipython'] = IPythonNotebookClient(_SAGE_SETTINGS['IPYTHON_URL'])
+
+    return cells
+
+
 # One sage cell instance per source file.
-_SAGE_CELL_INSTANCES = defaultdict(lambda : SageCell(dole_out()))
+_SAGE_CELL_INSTANCES = defaultdict(create_cells)
 
 _CONTENT_PATH = None 
 
@@ -80,7 +96,9 @@ class CellWorker(Thread):
             results = self.execute_blocks()
         except:
             logger.exception("Error in executing code blocks, retrying once.")
-            self.__cell.reset()
+            for cell in self.__cell.values():
+                cell.reset()
+
             results = self.execute_blocks()
 
         logger.info("Evaluation complete on %s.", self.__blocks[0].src.src)
@@ -91,11 +109,102 @@ class CellWorker(Thread):
         results = []
 
         for block in self.__blocks:
-            response = self.__cell.execute_request(block.content)
-            resp_results = self.__cell.get_results_from_response(response)
+            if block.language not in LanguagesStrEnum:
+                logger.error("%s is not a supported language.", block.language.upper())
+                continue
+
+            if block.platform not in self.__cell:
+                logger.error("%s not an available platform (try configuring url parameters in config file).", block.platform.upper())
+                continue
+
+            cell = self.__cell[block.platform]
+
+            response = cell.execute_request(block.content) # TODO: pass language as parameter
+            resp_results = cell.get_results_from_response(response)
             results.append((block.id, resp_results))
 
         return results
+
+def process_ipynb(manager, path, content_path, output_path):
+    
+    try:
+        content = open(path, 'r').read()
+        content = json.loads(content)
+        language = ''
+        platform = 'ipynb'
+
+        language = content.get('metadata', {})\
+                          .get('language', None) or 'python'
+
+        if content['nbformat'] != 3:
+            raise Exception("Unsupported nbformat " + str(content['nbformat']))
+
+        src = path.replace(content_path, '')
+
+        # Copy the file
+        shutil.copyfile(path, os.path.join(output_path,src[1:] if src.startswith('/') else src))
+
+        cell_order = 0
+        for worksheet in content['worksheets']:
+            for cell in worksheet['cells']:
+                if 'cell_type' not in cell or cell['cell_type'] != 'code':
+                    continue
+
+                code_block = ''.join(cell['input'])
+                user_id = cell_order
+
+                code_obj = manager.create_code(code=code_block,
+                                               src=src,
+                                               order=cell_order,
+                                               language=language,
+                                               platform=platform,
+                                               user_id=user_id)
+
+                cell_order += 1
+
+                if code_obj.last_evaluated is None:
+                    manager.timestamp_code(code_obj.id)
+                else:
+                    continue
+
+                results = []
+
+                for output in cell['outputs']:
+                    if 'display_data' != output['output_type']:
+                        continue
+
+                    include_text = 'html' not in output and 'png' not in output
+
+
+                    if 'text' in output and include_text:
+                        results.append(CR(ResultTypes.Stream,
+                                          len(results),
+                                          ''.join(output['text']),
+                                          'text/plain'))
+                    
+                    if 'html' in output:
+                        results.append(CR(ResultTypes.Stream,
+                                       len(results),
+                                       ''.join(output['html']),
+                                       'text/html'))
+
+                    if 'png' in output:
+                        results.append(CR(ResultTypes.Stream,
+                                       len(results),
+                                       output['png'],
+                                       'image/png'))
+
+                combined_results = combine_results(results)
+
+                for result in combined_results:
+                    manager.create_result(code_obj.id,
+                                          result.data,
+                                          result.order,
+                                          result.mimetype)
+        manager.commit()
+
+    except:
+        logger.exception('Could not process {} ipython notebook.'.format(path))
 
 def pre_read(generator):
     global _PREPROCESSING_DONE
@@ -108,7 +217,8 @@ def pre_read(generator):
     files = [article_file for article_file in 
                 generator.get_files(
                 generator.settings['ARTICLE_PATHS'],
-                exclude=generator.settings['ARTICLE_EXCLUDES'])]
+                exclude=generator.settings['ARTICLE_EXCLUDES'],
+                extensions=False)]
     for f in files:
         path = os.path.abspath(os.path.join(generator.path,f))
         article = generator.readers.get_cached_data(path, None)
@@ -118,6 +228,8 @@ def pre_read(generator):
             try:
                 if fmt.lower() == 'rst':
                     rst_reader.read(path)
+                elif fmt.lower() == 'ipynb':
+                    process_ipynb(_FILE_MANAGER, path, _CONTENT_PATH, _SAGE_SETTINGS['OUTPUT_PATH'])
             except:# Exception as e:
                 logger.exception('Could not process {}\n{}'.format(f, format_exc()))
                 continue
@@ -151,6 +263,20 @@ def pre_read(generator):
         thread.join()
 
     logger.info("Results fetched in %.2f seconds.", timeit.default_timer() - start_time)
+
+    for cells in _SAGE_CELL_INSTANCES.values():
+        for cell in cells.values():
+            cell.cleanup()
+
+    # write out raw text snippets
+    blks = _FILE_MANAGER.get_all_codeblocks()
+    raw_base_path = os.path.join(generator.settings['OUTPUT_PATH'], 'raw/')
+    create_directory_tree(raw_base_path)
+
+    for blk in blks:
+        raw_path = os.path.join(raw_base_path, '%s.txt' % (blk.id,))
+        with open(raw_path, 'w') as f:
+            f.write(blk.content)
 
     try:
         evaluator = CodeBlockEvaluator(_FILE_MANAGER)
@@ -200,10 +326,10 @@ class CodeBlockEvaluator(object):
         self._manager.timestamp_code(code_id)
 
         for order, result in enumerate(results):
-            pr_table[result.type](code_id, result, order)
+            pr_table[result.result_type](code_id, result, order)
 
     def _process_image(self, code_id, image, order):
-        _file_id = self._manager.create_file(code_id, image.data.url, image.data.file_name, order)
+        _file_id = self._manager.create_file(code_id, image.data, os.path.split(image.data)[1], order, image.mimetype)
 
     def _process_error(self, code_id, error, order):
         code_obj = self._manager.get_code(code_id)
@@ -219,7 +345,7 @@ class CodeBlockEvaluator(object):
                                    order)
 
     def _process_stream(self, code_id, stream, order):
-        self._manager.create_result(code_id, stream.data, order)
+        self._manager.create_result(code_id, stream.data, order, stream.mimetype)
 
 def sage_init(pelicanobj):
 
@@ -249,7 +375,10 @@ def process_settings(pelicanobj, settings):
     _SAGE_SETTINGS['CELL_URL'] = ['http://sagecell.sagemath.org']
     _SAGE_SETTINGS['PUBLIC_CELL'] = 'http://sagecell.sagemath.org'
     _SAGE_SETTINGS['FILE_BASE_PATH'] = os.path.join(pelicanobj.settings['OUTPUT_PATH'], 'images/sage')
+    _SAGE_SETTINGS['OUTPUT_PATH'] = pelicanobj.settings['OUTPUT_PATH']
     _SAGE_SETTINGS['DB_PATH'] = ':memory:'
+    _SAGE_SETTINGS['IPYTHON_URL'] = ''
+    _SAGE_SETTINGS['IHASKELL_URL'] = ''
     _CONTENT_PATH = pelicanobj.settings['PATH']
 
 
@@ -266,6 +395,8 @@ def process_settings(pelicanobj, settings):
         md('PUBLIC_CELL')
         md('FILE_BASE_PATH')
         md('DB_PATH', transform_content_db)
+        md('IPYTHON_URL')
+        md('IHASKELL_URL')
 
 def _define_choice(choice1, choice2):
     return lambda arg : directives.choice(arg, (choice1, choice2))
@@ -291,25 +422,43 @@ def _transform_pre(content, id=None, class_=None):
                         'content' : content}, 
                      format='html')
 
-def _mod_format_permalinks(code_obj):
+def _mod_format_code_footer(code_obj):
     if code_obj is None:
         return ''
+    link_template = "<div class='permalinks'>%(link_content)s</div>"
+    link_content = ''
 
-    link_template = '<a href="%s/?z=%%s">%%s</a>' % ( 
-                    _SAGE_SETTINGS['PUBLIC_CELL'],)
+    if code_obj.platform == 'ipynb':
+        details = {'language': code_obj.language,
+                   'location': code_obj.src.src}
+        link_content += "i%(language)s: <a href='%(location)s'>notebook</a>" % details
+    elif code_obj.platform == 'sage':
+        sage_template = '<a href="%s/?z=%%s">%%s</a>' % ( 
+                        _SAGE_SETTINGS['PUBLIC_CELL'],)
+        link_content += "sage: %s %s" % ('' if not code_obj.permalink else sage_template % (code_obj.permalink,'block'),
+                                         '' if not code_obj.src.permalink else sage_template % (code_obj.src.permalink,'all'))
 
-    return """
-<div class='permalinks'>
-%s
-%s
-</div>
-""" % ('' if not code_obj.permalink else link_template % (code_obj.permalink,'blk'),
-       '' if not code_obj.src.permalink else link_template % (code_obj.src.permalink,'src'))
+    link_content += "<a href='/raw/%s.txt'>raw</a>" % (code_obj.id,)
+
+    return link_template % {'link_content': link_content}
 
 def _mod_transform_result(code_id, result, order):
     code_obj = _FILE_MANAGER.get_code(code_id)
     permalink = ''
     src_permalink=''
+    result_data = ''
+
+    if result.mimetype == 'image/png':
+        return _mod_transform_image(code_id, result, order)
+
+    if result.type == ResultTypes.Error:
+        result_data = ansi_converter(result.data.traceback)
+    else:
+        result_data = result.data
+
+    if result.mimetype != 'text/html':
+        result_data = '<pre>%s</pre>' % (result_data,)
+
     if code_obj:
         permalink = code_obj.permalink
         src_permalink = code_obj.src.permalink
@@ -317,29 +466,34 @@ def _mod_transform_result(code_id, result, order):
 """
 <div class="code_block out_block">
 <div class='watermark'>[out %(order)s]</div>
-<pre>%(result)s</pre>
+%(result)s
 %(links)s
 </div>
-"""%{'result' : result,
+"""%{'result' : result_data,
      'order' : code_obj.order + 1,
-     'links' : _mod_format_permalinks(code_obj)},format='html')
+     'links' : _mod_format_code_footer(code_obj)},format='html')
 
 def _mod_transform_image(code_id, image, order):
     code_obj = _FILE_MANAGER.get_code(code_id)
+    image_node = lambda x : nodes.raw('',"<img src='%s'/>" % (x,), format='html')
     if not isinstance(image, nodes.image):
-        image = nodes.raw('',"<span><img src='%s'/></span>"%(_image_location(code_id, image.data.file_name),), format='html')
-
-    print(image)
-    print(type(image))
-
+        if image.mimetype == 'image/png' and image.type != ResultTypes.Image:
+            image = image_node("data:image/png;base64," + image.data)
+        else:
+            image = image_node(_image_location(code_id, image.data.file_name))
+    else:
+        image['style'] = 'margin-left: auto; margin-right: auto; display: block;'
     outer = nodes.container('',
                         nodes.raw('',
                                       "<div class='watermark'>[out %s]</div>" % (code_obj.order+1,),
                                       format='html'),
                             classes=['code_block'])
-    outer += image 
+    image_container = nodes.container('',
+                               image,
+                               classes=['image_container'])
+    outer += image_container
     outer += nodes.raw('',
-                       _mod_format_permalinks(code_obj), format='html'),
+                       _mod_format_code_footer(code_obj), format='html'),
     return outer
 
 class SageDirective(CodeBlock):
@@ -349,6 +503,9 @@ class SageDirective(CodeBlock):
 
     final_argument_whitespace = False
     has_content = True
+
+    _language = 'python'
+    _platform = 'sage'
 
     option_spec = { 'id'               : str,
                     'method'           : _define_choice('static', 'dynamic'),
@@ -369,11 +526,13 @@ class SageDirective(CodeBlock):
         return False
 
     def _transform_error(self, code_id, error, order):
-        return _mod_transform_result(code_id, ansi_converter(error.data.traceback), order)
+        return _mod_transform_result(code_id, error, order)
 
     
     def _transform_stream(self, code_id, stream, order):
-        return _mod_transform_result(code_id, stream.data, order)
+        if stream.mimetype == 'image/png':
+            return _mod_transform_image(code_id, stream, order)
+        return _mod_transform_result(code_id, stream, order)
 
 
     def _transform_image(self, code_id, image, order):
@@ -401,30 +560,15 @@ class SageDirective(CodeBlock):
     def _get_source(self):
         return _get_source(self)
 
-    def _get_sage_instance(self):
-        global _SAGE_CELL_INSTANCES
-        src = self._get_source()
-
-        return _SAGE_CELL_INSTANCES[src]
-
     def _get_results(self, code_obj):
         results = code_obj.results
 
         return results
 
-    def run(self):
+    def _get_language(self):
+        return 'python'
 
-        # The first pass collects up code blocks.
-
-        # The second pass spits out results to output.
-
-        global _PREPROCESSING_DONE
-
-        if not self.arguments:
-            self.arguments = ['python']
-        
-        if 'number-lines' not in self.options:
-            self.options['number-lines'] = None
+    def _create_codeblock(self):
 
         # grab the order and bump it up
         src = self._get_source()
@@ -441,7 +585,25 @@ class SageDirective(CodeBlock):
         code_obj = _FILE_MANAGER.create_code(code=code_block,
                                              src=src,
                                              order=order,
+                                             language=self.arguments[0],
+                                             platform=self._platform,
                                              user_id=user_id)
+
+        return code_obj
+
+
+    def run(self):
+
+        # The first pass collects up code blocks.
+
+        # The second pass spits out results to output.
+
+        global _PREPROCESSING_DONE
+
+        if not self.arguments:
+            self.arguments = [self._language]
+
+        code_obj = self._create_codeblock()
 
         # First pass, reading only
         if not _PREPROCESSING_DONE:
@@ -460,7 +622,7 @@ class SageDirective(CodeBlock):
                                     classes=['code_block', 'in_block'])
             outer += return_nodes[0]
             outer += nodes.raw('',
-                               _mod_format_permalinks(code_obj), format='html'),
+                               _mod_format_code_footer(code_obj), format='html'),
             return_nodes = [outer]
         else:
             return_nodes = []
@@ -468,6 +630,19 @@ class SageDirective(CodeBlock):
         return_nodes.extend(self._transform_results(code_id, results))
 
         return return_nodes
+
+class IHaskellDirective(SageDirective):
+    _language = 'haskell'
+    _platform = 'ihaskell'
+
+class IPythonDirective(SageDirective):
+    _language = 'python'
+    _platform = 'ipython'
+
+
+        
+
+
 
 class SageResultMixin(object):
 
@@ -478,11 +653,15 @@ class SageResultMixin(object):
     def _get_source(self):
         return _get_source(self)
 
-    def _get_file_reference(self):
+    def _get_file_reference(self, src=None, make_abs=False):
 
         if 'file' in self.options:
             src = self.options['file']
-            
+            make_abs = True
+        elif not src:
+            src = self._get_source()
+
+        if make_abs:
             if src.startswith('/'):
                 src = os.path.join(_CONTENT_PATH, src[1:])
             else:
@@ -490,18 +669,16 @@ class SageResultMixin(object):
                 src_file = self._get_source()
                 # split it out
                 src = os.path.join(os.path.split(src_file)[0], src)
-        else:
-            src = self._get_source()
 
         src = os.path.join(_CONTENT_PATH, src)
         src = os.path.abspath(src)
 
         if _CONTENT_PATH not in src:
-            raise Exception("Source for sage image directive is not relative to"
+            raise Exception("Source for %s is not relative to"
                             " the content directory.\n"
                             "Original Source: %s\n"
                             "File path after substitution: %s" % 
-                            (self._get_source(), src))
+                            (self.__class__.__name__, self._get_source(), src))
 
         this_src = self._get_source().replace(_CONTENT_PATH, '')
         src = src.replace(_CONTENT_PATH, '')
@@ -551,6 +728,28 @@ class SageResultMixin(object):
 
         return self._get_code_result(src)
 
+class IPythonNotebook(SageDirective, SageResultMixin):
+
+    option_spec = dict(list(SageDirective.option_spec.items()) + [('order', str)])
+    def _create_codeblock(self):
+
+        global _PREPROCESSING_DONE
+
+        if not _PREPROCESSING_DONE:
+            return
+
+        src = self._get_file_reference(self.arguments[0], make_abs=True)
+
+        if 'order' not in self.options:
+            raise Exception("You must provide an order to select the correct cell in ", self.arguments[0])
+
+        code_obj = _FILE_MANAGER.get_code(user_id = self.options['order'], src=src)
+        
+        self.content = code_obj.content.split('\n')
+        self.arguments[0] = code_obj.language
+
+        return code_obj
+
 class SageResult(SageResultMixin, Directive):
 
     option_spec = SageResultMixin.option_spec
@@ -568,7 +767,11 @@ class SageResult(SageResultMixin, Directive):
 
         code_obj, result = result
 
-        return [_mod_transform_result(code_obj.id, result.data, result.order)]
+        if result is None:
+            logger.warning("%s has no result with the provided parameters:\n%s", self._get_file_reference(), self.options)
+            return []
+
+        return [_mod_transform_result(code_obj.id, result, result.order)]
 
 class SageImage(SageResultMixin, Image):
 
@@ -586,6 +789,9 @@ class SageImage(SageResultMixin, Image):
 
         code_obj, result = result
 
+        if result is None:
+            return []
+
         self.arguments[0] = _image_location(code_obj.id, result.file_name)
 
         return [_mod_transform_image(code_obj.id, super(SageImage, self).run()[0], result.order)]
@@ -595,5 +801,8 @@ def register():
     directives.register_directive('sage', SageDirective)
     directives.register_directive('sage-image', SageImage)
     directives.register_directive('sage-result', SageResult)
+    directives.register_directive('ipynb', IPythonNotebook)
+    directives.register_directive('ipython', IPythonDirective)
+    directives.register_directive('ihaskell', IHaskellDirective)
     signals.article_generator_preread.connect(pre_read)
     signals.initialized.connect(sage_init)

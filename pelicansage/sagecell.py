@@ -18,9 +18,7 @@ from itertools import groupby
 
 import pprint
 
-CellResult = NT('CellResult', 'type order data')
-SageError = NT('SageError', 'ename evalue traceback')
-SageImage = NT('SageImage', 'file_name url')
+from .util import CellResult, SageError, combine_results
 
 CR = CellResult
 
@@ -57,8 +55,7 @@ class BaseClient(object):
         raise NotImplemented()
 
     def cleanup(self):
-        raise NotImplemented()
-
+        self.close()
 
     def execute_request(self, code, store_history=False):
         # zero out our list of messages, in case this is not the first request
@@ -140,80 +137,97 @@ class BaseClient(object):
 
     def get_results_from_response(self, response):
         results = self.get_streams_from_response(response)
-        results.extend(self.get_image_urls_from_response(response))
-        results.extend(self.get_errors_from_response(response))
-        results.sort(key=lambda x: x.order)
-        results = [list(items) for order, items in groupby(results, key=lambda x: x.type)]
 
-        for indx in range(len(results)):
-            if results[indx][0].type == ResultTypes.Stream:
-                results[indx] = [CR(ResultTypes.Stream, 
-                                    results[indx][0].order, 
-                                    ''.join([x.data for x in results[indx]]))]
-        
-        return [item for sublist in results for item in sublist]
+        combined_result = combine_results(results)
+
+        return combined_result 
+
+    def _get_from_response(self, response, action):
+
+        kernel_url = response['kernel_url']
+        iopub = response['iopub']
+
+        results = []
+
+        # This will give us an ordering index to interleave results / images if we want.
+        message_index = 0
+
+        for message in iopub:
+            message_index += 1
+
+            if 'msg_type' not in message:
+                continue
+
+            result = action(message, message_index)
+                
+            if result is not None:
+                results.append(result)
+
+        return results
+
+    def _check_and_grab(self, message, msg_type, traversal, creation):
+        if message['msg_type'] == msg_type:
+            node = traverse_down(*traversal)
+
+            if node is not None:
+                return creation(node)
 
     def get_streams_from_response(self, response):
 
-        kernel_url = response['kernel_url']
-        iopub = response['iopub']
+        def action(message, message_index):
+            cag = lambda *args: self._check_and_grab(message, *args)
+            cr  = lambda indx, node, mimetype, result_type=ResultTypes.Stream: CR(result_type, indx, node, mimetype)
 
-        results = []
+            def cr_err(indx, node):
+                node['traceback'] = '\n'.join(node['traceback'])
+                return CR(ResultTypes.Error, message_index, SageError(**node), 'text/x-python-traceback')
 
-        # This will give us an ordering index to interleave results / images if we want.
-        message_index = 0
+            msg_content = (message, 'content', 'data')
 
-        for message in iopub:
-            message_index += 1
-            if 'msg_type' in message and message['msg_type'] == "stream":
-                node = traverse_down(message, 'content', 'data')
+            def filter_display(node):
+                filter_msgs = ('application/sage-interact', 'application/sage-clear',)
+                for filter_msg in filter_msgs:
+                    if traverse_down(*(msg_content + (filter_msg,))) is not None:
+                        return None
 
-                if node is not None:
-                    results.append(CR(ResultTypes.Stream, message_index, node))
+                return cr(message_index, node, 'text/plain')
 
-        return results
+            checks = [cag('stream',
+                          msg_content,
+                          lambda node: cr(message_index, node, 'text/plain')),
+                      cag('display_data',
+                          msg_content + ('image/png',),
+                          lambda node: cr(message_index, node, 'image/png')),
+                      cag('display_data',
+                          msg_content + ('text/html',),
+                          lambda node: cr(message_index, node, 'text/html')),
+                      cag('display_data',
+                          msg_content + ('text/image-filename',),
+                          lambda node: cr(message_index, self.kernel_url.replace('ws:','http:')+'files/'+node, 'text/image-filename', ResultTypes.Image)),
+                      cag('display_data',
+                          msg_content + ('text/plain',),
+                          filter_display),
+                      cag('pyerr',
+                          (message, 'content'),
+                          lambda node: cr_err(message_index, node)),
+                      ] 
+
+            # We are only going to do the first item.
+            result = tuple(filter(lambda x: x is not None, checks))
+            return result[0] if result else None
+
+        return self._get_from_response(response, action)
+
+    def __filter_on_mime(self, mimetype, streams):
+        return tuple(filter(lambda x: x.mimetype == mimetype, streams))
 
     def get_errors_from_response(self, response):
-
-        kernel_url = response['kernel_url']
-        iopub = response['iopub']
-
-        results = []
-
-        # This will give us an ordering index to interleave results / images if we want.
-        message_index = 0
-
-        for message in iopub:
-            message_index += 1
-            if 'msg_type' in message and message['msg_type'] == "pyerr":
-                node = traverse_down(message, 'content')
-
-                if node is not None:
-                    node['traceback'] = '\n'.join(node['traceback'])
-                    results.append(CR(ResultTypes.Error, message_index, SageError(**node)))
-
-        return results
+        streams = self.get_streams_from_response(response)
+        return self.__filter_on_mime('text/x-python-traceback', streams)
 
     def get_image_urls_from_response(self, response):
-
-        kernel_url = response['kernel_url']
-        iopub = response['iopub']
-        file_url_base = kernel_url.replace('ws:','http:') + 'files/' 
-        file_urls = []
-
-        # This will give us an ordering index to interleave results / images if we want.
-        message_index = 0
-
-        for message in iopub:
-            message_index += 1
-            if 'msg_type' in message and message['msg_type'] == "display_data":
-                node = traverse_down(message, 'content', 'data', 'text/image-filename')
-
-                if node is not None:
-                    file_url = file_url_base + node
-                    file_urls.append(CR(ResultTypes.Image, message_index, SageImage(node, file_url_base + node)))
-
-        return file_urls
+        streams = self.get_streams_from_response(response)
+        return self.__filter_on_mime('text/image-filename', streams)
 
 class SageCell(BaseClient):
 
@@ -249,6 +263,7 @@ class SageCell(BaseClient):
     def _get_kernel_url(self, response):
         return response['ws_url']+'kernel/'+response['id']+'/'
 
+
 class IPythonNotebookClient(BaseClient):
 
     def _create_new_session(self):
@@ -263,11 +278,12 @@ class IPythonNotebookClient(BaseClient):
         resp = resp_new_notebook.json()
         self.notebook_name = resp['name']
         self.notebook_path =  resp['path']
+
         self._json_session_info ={ 
                                     'notebook':
                                     { 
                                       'name': self.notebook_name,
-                                      'path': self.notebook_path
+                                      'path': self.notebook_path if self.notebook_path else ''
                                     }
                                  }
         self._json_session_info = json.dumps(self._json_session_info)
@@ -289,7 +305,7 @@ class IPythonNotebookClient(BaseClient):
             self._shell.send(self._make_request('shutdown_request', {'restart': False}))
             self.req_ses.delete(url=self.url+'api/sessions/%s' % (self.session,),
                                 headers={'Accept': 'application/json'})
-            self.req_ses.delete(url=self.url+'api/notebooks',
+            self.req_ses.delete(url=self.url+'api/notebooks/%s' %(self.notebook_name,),
                           data=self._json_session_info,
                           headers={'Accept': 'application/json'})
 
@@ -312,29 +328,129 @@ def traverse_down(collection, *args):
 
     return node
 
-def main():
+def test_haskell():
     import pprint
-    import sys
-    b = SageCell('http://sagecell.sagemath.org/')
-    result = b.execute_request("print 'Hi.'")
-    pprint.pprint(result)
 
-    print("-"*70)
-
-    a=IPythonNotebookClient('http://localhost:8899', timeout=None)
+    a=IHaskellNotebookClient('http://localhost:8899', timeout=None)
     result = a.execute_request("""
 print "Hello1."
 """, True)
     pprint.pprint(result)
     result = a.execute_request("""
-putStrLn "Hello2."
+-- We can draw diagrams, right in the notebook.
+:extension NoMonomorphismRestriction
+import Diagrams.Prelude
+
+-- By Brent Yorgey
+-- Draw a Sierpinski triangle!
+sierpinski 1 = eqTriangle 1
+sierpinski n =     s
+                  ===
+               (s ||| s) # centerX
+  where s = sierpinski (n-1)
+
+-- The `diagram` function is used to display them in the notebook.
+diagram $ sierpinski 4
+            # centerXY
+            # fc black
+          `atop` square 10
+                   # fc white
 """, True)
     pprint.pprint(result)
     a.cleanup()
 
+def test_ipython_notebook():
+
+    import pprint
+    import sys
+    c = IPythonNotebookClient('http://localhost:8888', timeout=None)
+    resp = c.execute_request("""
+%matplotlib inline
+print("Hello.")
+from math import pi
+from numpy import array, arange, sin
+import pylab as P
+
+for knockoff in range(100):
+    print(knockoff)
+
+fig = P.figure()
+x = arange(10.0)
+y = sin(arange(10.0)/20.0*pi)
+
+P.errorbar(x,y,yerr=0.1,capsize=3)
+
+y = sin(arange(10.0)/20.0*pi) + 1
+P.errorbar(x,y,yerr=0.1, uplims=True)
+
+y = sin(arange(10.0)/20.0*pi) + 2
+upperlimits = array([1,0]*5)
+lowerlimits = array([0,1]*5)
+P.errorbar(x, y, yerr=0.1, uplims=upperlimits, lolims=lowerlimits)
+
+P.xlim(-1,10)
+
+fig = P.figure()
+x = arange(10.0)/10.0
+y = (x+0.1)**2
+
+P.errorbar(x, y, xerr=0.1, xlolims=True)
+y = (x+0.1)**3
+
+P.errorbar(x+0.6, y, xerr=0.1, xuplims=upperlimits, xlolims=lowerlimits)
+
+y = (x+0.1)**4
+P.errorbar(x+1.2, y, xerr=0.1, xuplims=True)
+
+P.xlim(-0.2,2.4)
+P.ylim(-0.1,1.3)
+
+print("other item?")
+P.show()
+
+print("hello.")
+raise Exception()
+""")
+    results = c.get_results_from_response(resp)
+    pprint.pprint(resp)
+    for result in results:
+        print(str(result)[0:80])
+    c.cleanup()
+
+def main():
+   
+    print("-"*70)
+    b = SageCell('http://sagecell.sagemath.org/')
+    resp = b.execute_request("""
+print 'Hi.'
+H=Graph({0 : [1,2,3], 4 : [0, 2], 6 : [1,2,3,4,5]})
+a = plot(H)
+a.show()
+import numpy
+
+difference = 3
+
+print "hi."
+
+import pylab as plt
+
+t = plt.arange(0.0, 2.0, 0.01)
+s = plt.sin(2*pi*t)
+plt.plot(t, s)
+plt.xlabel('time (s)')
+plt.ylabel('voltage (mV)')
+plt.title('About as simple as it gets, folks')
+plt.grid(True)
+#savefig("test.png")
+plt.show()
+#factorial(2012)
+""")
+    pprint.pprint(resp)
+    results = b.get_results_from_response(resp)
+    pprint.pprint(results)
 
 
-    return result 
+    return results
 
 if __name__ == "__main__":
     main()
