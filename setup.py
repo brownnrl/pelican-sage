@@ -26,5 +26,5 @@ setup(name='pelicansage',
           'Topic :: Text Processing',
       ],
       zip_safe=True,
-      install_requires=['pelican>=3.3.4','ansi2html>=1.0.6']
+      install_requires=['pelican>=3.3.4', 'ansi2html>=1.0.6']
       )

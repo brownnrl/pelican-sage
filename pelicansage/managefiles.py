@@ -46,7 +46,7 @@ class BaseMixin(object):
 
 class EvaluationType(Base, BaseMixin):
     __tablename__ = 'EvaluationType'
-    ALL_NUM = (1,2,3)
+    ALL_NUM = (1, 2, 3)
     STATIC, DYNAMIC, CLIENT = ALL_NUM
     ALL_STR = ['static', 'dynamic', 'client']
 
@@ -55,20 +55,20 @@ class EvaluationType(Base, BaseMixin):
 
 class SrcReference(Base):
     __tablename__ = 'SrcReference'
-    src_id1 = Column(Integer, ForeignKey('Src.id'), primary_key=True)
-    src_id2 = Column(Integer, ForeignKey('Src.id'), primary_key=True)
+    src_id1 = Column(Integer, ForeignKey('DataSrc.id'), primary_key=True)
+    src_id2 = Column(Integer, ForeignKey('DataSrc.id'), primary_key=True)
 
-    src1 = relationship('Src', primaryjoin='(Src.id == SrcReference.src_id1)')
-    src2 = relationship('Src', primaryjoin='(Src.id == SrcReference.src_id2)')
+    src1 = relationship('DataSrc', primaryjoin='(DataSrc.id == SrcReference.src_id1)')
+    src2 = relationship('DataSrc', primaryjoin='(DataSrc.id == SrcReference.src_id2)')
 
-class Src(Base, BaseMixin):
-    __tablename__ = 'Src'
+class DataSrc(Base, BaseMixin):
+    __tablename__ = 'DataSrc'
     id = Column(Integer, primary_key=True)
     src = Column(String, unique=True)
     permalink = Column(String)
     filetype = Column(FileTypes, default='rst')
     
-    code_blocks = relationship('CodeBlock', backref='Src',
+    code_blocks = relationship('CodeBlock', backref='DataSrc',
                                 cascade='save-update, merge, delete')
 
     references = relationship('SrcReference', 
@@ -78,7 +78,7 @@ class CodeBlock(Base, BaseMixin):
     __tablename__ = 'CodeBlock'
     id = Column(Integer, primary_key=True)
     user_id = Column(String)
-    src_id = Column(Integer, ForeignKey('Src.id'))
+    src_id = Column(Integer, ForeignKey('DataSrc.id'))
     order = Column(Integer)
     content = Column(String)
     eval_type_id = Column(Integer, ForeignKey('EvaluationType.id'),default=1)
@@ -87,7 +87,7 @@ class CodeBlock(Base, BaseMixin):
     language = Column(Languages)
     platform = Column(Platforms)
 
-    src = relationship('Src', backref='Src')
+    src = relationship('DataSrc', backref='DataSrc')
     stream_results = relationship('StreamResult', backref='CodeBlock',
                                    cascade='save-update, merge, delete')
     file_results = relationship('FileResult', backref='CodeBlock',
@@ -196,9 +196,9 @@ class FileManager(object):
 
         However, each sub-list can be evaluated asynchronously.
         """
-        srcs = self._session.query(Src).join(CodeBlock).filter(CodeBlock.last_evaluated==None,
-                                                               CodeBlock.platform != 'ipynb',
-                                                               Src.filetype != 'ipynb').all()
+        srcs = self._session.query(DataSrc).join(CodeBlock).filter(CodeBlock.last_evaluated == None,
+                                                                   CodeBlock.platform != 'ipynb',
+                                                                   DataSrc.filetype != 'ipynb').all()
 
         blocks = [src.code_blocks for src in srcs]
 
@@ -228,16 +228,16 @@ class FileManager(object):
         return src_ref_obj
 
     def create_src(self, src):
-        src_obj = self._session.query(Src).filter_by(src=src).first()
+        src_obj = self._session.query(DataSrc).filter_by(src=src).first()
 
         ext = self.io.os.path.splitext(src)[1][1:]
 
         if src_obj is None:
             # Add the src object
-            src_obj = Src(src=src, filetype=ext)
-            self._session.add(Src(src=src))
+            src_obj = DataSrc(src=src, filetype=ext)
+            self._session.add(src_obj)
             self._session.flush()#self._session.commit()
-            src_obj = self._session.query(Src).filter_by(src=src).first()
+            src_obj = self._session.query(DataSrc).filter_by(src=src).first()
 
         return src_obj
 
@@ -250,7 +250,7 @@ class FileManager(object):
             return
 
         code = ''
-        code += ("\nhtml('<br/><hr/><br/>')\n#" + '-'*40 + "\n").join([block.content for block in blocks])
+        code += ("\npretty_print(html('<br/><hr/><br/>'))\n#" + '-'*40 + "\n").join([block.content for block in blocks])
 
         def gen_permalink(content):
 
@@ -278,15 +278,12 @@ class FileManager(object):
         # check for an exisiting user id
 
         if user_id is not None:
-            fetch = self._session.query(Src, CodeBlock)\
-                                 .join(CodeBlock)\
-                                 .join(Src)\
-                                 .filter(Src.src==src, 
-                                         CodeBlock.user_id==user_id)\
+            fetch = self._session.query(CodeBlock)\
+                                 .join(DataSrc)\
+                                 .filter(DataSrc.src == src, CodeBlock.user_id == user_id)\
                                  .first()
 
             if fetch is not None:
-                fetch_src, fetch = fetch
                 if fetch.order != order:
                     # Resolve by removing the other tag.
                     # So 'last tag remaining' wins.
@@ -338,7 +335,8 @@ class FileManager(object):
             fetch.last_evaluated = None
 
         self._session.add(fetch)
-        self._session.flush()#self._session.commit()
+        self._session.flush()
+        self._session.commit()
         self._session.refresh(fetch)
 
         return fetch

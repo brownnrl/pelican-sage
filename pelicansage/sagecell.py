@@ -5,16 +5,12 @@ Requires the websocket-client package: http://pypi.python.org/pypi/websocket-cli
 """
 
 import websocket
-import threading
 import json
 from uuid import uuid4
 
 from .pelicansageio import pelicansageio
 
 from .managefiles import ResultTypes
-
-from collections import namedtuple as NT
-from itertools import groupby
 
 import pprint
 
@@ -66,8 +62,8 @@ class BaseClient(object):
             # construct the iopub and shell websocket channel urls from that
 
             websocket.setdefaulttimeout(self.timeout)
-            self._shell = websocket.create_connection(self.kernel_url+'shell')
-            self._iopub = websocket.create_connection(self.kernel_url+'iopub')
+            self._ws = websocket.create_connection(self.kernel_url + 'channels',
+                                                   header={'Jupyter-Kernel-ID': self.kernel_id})
             self._send_first_message()
 
             self._running = True
@@ -80,35 +76,27 @@ class BaseClient(object):
         # Send the JSON execute_request message string down the shell channel
 
         msg = self._make_execute_request(code, store_history)
-        self._shell.send(msg)
+        self._ws.send(msg)
             
-        # We use threads so that we can simultaneously get the messages on both channels.
-        self.threads = [threading.Thread(target=self._get_iopub_messages), 
-                        threading.Thread(target=self._get_shell_messages)]
-        for t in self.threads:
-            t.start()
-
-        # Wait until we get both a kernel status idle message and an execute_reply message
-        for t in self.threads:
-            t.join()
+        self._get_messages()
 
         return {'kernel_url': self.kernel_url, 'shell': self.shell_messages, 'iopub': self.iopub_messages}
 
-    def _get_shell_messages(self):
-        while True and self._running:
-            msg = json.loads(self._shell.recv())
-            self.shell_messages.append(msg)
-            # an execute_reply message signifies the computation is done
-            if msg['header']['msg_type'] == 'execute_reply':
-                break
-
-    def _get_iopub_messages(self):
-        while True and self._running:
-            msg = json.loads(self._iopub.recv())
-            self.iopub_messages.append(msg)
-            # the kernel status idle message signifies the kernel is done
-            if msg['header']['msg_type'] == 'status' and msg['content']['execution_state'] == 'idle':
-                break
+    def _get_messages(self):
+        got_execute_reply = False
+        got_idle_status = False
+        while not (got_execute_reply and got_idle_status):
+            msg = json.loads(self._ws.recv())
+            if msg['channel'] == 'shell':
+                self.shell_messages.append(msg)
+                # an execute_reply message signifies the computation is done
+                if msg['header']['msg_type'] == 'execute_reply':
+                    got_execute_reply = True
+            if msg['channel'] == 'iopub':
+                self.iopub_messages.append(msg)
+                # the kernel status idle message signifies the kernel is done
+                if msg['header']['msg_type'] == 'status' and msg['content']['execution_state'] == 'idle':
+                    got_idle_status = True
 
     def _make_request(self, msg_type, content):
         message = str(uuid4())
@@ -132,8 +120,7 @@ class BaseClient(object):
 
     def close(self):
         # If we define this, we can use the closing() context manager to automatically close the channels
-        self._shell.close()
-        self._iopub.close()
+        self._ws.close()
 
     def get_results_from_response(self, response):
         results = self.get_streams_from_response(response)
@@ -166,6 +153,8 @@ class BaseClient(object):
         return results
 
     def _check_and_grab(self, message, msg_type, traversal, creation):
+        if message['msg_type'] == 'stream':
+            pass
         if message['msg_type'] == msg_type:
             node = traverse_down(*traversal)
 
@@ -193,7 +182,7 @@ class BaseClient(object):
                 return cr(message_index, node, 'text/plain')
 
             checks = [cag('stream',
-                          msg_content,
+                          (message, 'content', 'text'),
                           lambda node: cr(message_index, node, 'text/plain')),
                       cag('display_data',
                           msg_content + ('image/png',),
@@ -203,11 +192,14 @@ class BaseClient(object):
                           lambda node: cr(message_index, node, 'text/html')),
                       cag('display_data',
                           msg_content + ('text/image-filename',),
-                          lambda node: cr(message_index, self.kernel_url.replace('ws:','http:')+'files/'+node, 'text/image-filename', ResultTypes.Image)),
+                          lambda node: cr(message_index,
+                                          self.kernel_url.replace('ws:', 'http:')+'files/'+node,
+                                          'text/image-filename',
+                                          ResultTypes.Image)),
                       cag('display_data',
                           msg_content + ('text/plain',),
                           filter_display),
-                      cag('pyerr',
+                      cag('error',
                           (message, 'content'),
                           lambda node: cr_err(message_index, node)),
                       ] 
@@ -235,7 +227,7 @@ class SageCell(BaseClient):
         self.req_ses = self.io.requests.Session()
         s = self.req_ses
         self.session = str(uuid4())
-        resp = s.post('http://sagecell.sagemath.org/kernel',
+        resp = s.post(self.url + 'kernel',
                      data={'accepted_tos':'true'},
                      headers={'Accept': 'application/json'})
 
@@ -277,7 +269,7 @@ class IPythonNotebookClient(BaseClient):
 
         resp = resp_new_notebook.json()
         self.notebook_name = resp['name']
-        self.notebook_path =  resp['path']
+        self.notebook_path = resp['path']
 
         self._json_session_info ={ 
                                     'notebook':
@@ -297,12 +289,11 @@ class IPythonNotebookClient(BaseClient):
         self.kernel_url = self.url.replace('http:','ws:') + 'api/kernels/' + self.kernel_id + '/'
 
     def _send_first_message(self):
-        self._shell.send(self.session + ":")
-        self._iopub.send(self.session + ":")
+        self._ws.send(self.session + ":")
 
     def cleanup(self):
-        if self._running and self._shell.connected:
-            self._shell.send(self._make_request('shutdown_request', {'restart': False}))
+        if self._running and self._ws.connected:
+            self._ws.send(self._make_request('shutdown_request', {'restart': False}))
             self.req_ses.delete(url=self.url+'api/sessions/%s' % (self.session,),
                                 headers={'Accept': 'application/json'})
             self.req_ses.delete(url=self.url+'api/notebooks/%s' %(self.notebook_name,),
@@ -422,28 +413,7 @@ def main():
     print("-"*70)
     b = SageCell('http://sagecell.sagemath.org/')
     resp = b.execute_request("""
-print 'Hi.'
-H=Graph({0 : [1,2,3], 4 : [0, 2], 6 : [1,2,3,4,5]})
-a = plot(H)
-a.show()
-import numpy
-
-difference = 3
-
-print "hi."
-
-import pylab as plt
-
-t = plt.arange(0.0, 2.0, 0.01)
-s = plt.sin(2*pi*t)
-plt.plot(t, s)
-plt.xlabel('time (s)')
-plt.ylabel('voltage (mV)')
-plt.title('About as simple as it gets, folks')
-plt.grid(True)
-#savefig("test.png")
-plt.show()
-#factorial(2012)
+raise Exception("Bad.")
 """)
     pprint.pprint(resp)
     results = b.get_results_from_response(resp)

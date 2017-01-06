@@ -4,3 +4,5 @@ dist/
 *.egg*
 *.pyc
 *.sw*
+.cache/
+.idea/
