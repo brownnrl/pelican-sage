@@ -223,6 +223,7 @@ def process_ipynb(manager, path, content_path, output_path):
 def pre_read(generator):
     global _PREPROCESSING_DONE
     if _PREPROCESSING_DONE:
+        SageDirective.reset_src_order()
         return
 
     rst_reader = RstReader(generator.settings)
@@ -253,9 +254,9 @@ def pre_read(generator):
                 continue
 
     # Reset the src order lookup table
-    SageDirective._src_order = defaultdict(lambda: 0)
     logger.info("Sage pre-processing completed.")
     _PREPROCESSING_DONE = True
+    SageDirective.reset_src_order()
 
     # We now have all code blocks in our database, and have to evaluate
     # them.
@@ -328,6 +329,10 @@ def pre_read(generator):
         path2 = join_path(reference.src2.src)
         _FILE_MANAGER.io.touch_file(path1)
         _FILE_MANAGER.io.touch_file(path2)
+
+def post_context(*args, **kwargs):
+    logger.info("<<<<<<POST CONTEXT>>>>>>: %s , %s", args, kwargs)
+    SageDirective.reset_src_order()
 
 
 class CodeBlockEvaluator(object):
@@ -523,6 +528,10 @@ class SageDirective(CodeBlock):
 
     _src_order = defaultdict(lambda: 0)
 
+    @staticmethod
+    def reset_src_order():
+        SageDirective._src_order.clear()
+
     final_argument_whitespace = False
     has_content = True
 
@@ -595,12 +604,14 @@ class SageDirective(CodeBlock):
         # grab the order and bump it up
         src = self._get_source()
         src = src.replace(_CONTENT_PATH, '')
-        order = self._src_order[src]
-        self._src_order[src] = order + 1
+        order = SageDirective._src_order[src]
+        SageDirective._src_order[src] = order + 1
 
         user_id = None
         if 'id' in self.options:
             user_id = self.options['id'].strip().lower()
+
+        logger.debug("USER_ID DEBUG: %s - %s - %s - %s", self.content[:1], src, order, user_id)
 
         code_block = '\n'.join(self.content)
 
@@ -624,6 +635,7 @@ class SageDirective(CodeBlock):
         if not self.arguments:
             self.arguments = [self._language]
 
+        logger.debug("Creating codeblock: %s ", self._get_source())
         code_obj = self._create_codeblock()
 
         # First pass, reading only
@@ -729,7 +741,8 @@ class SageResultMixin(object):
 
         if result is None:
             # TODO: Better message
-            logger.warning("Tried to retrieve result but failed.")
+            logger.warning("Tried to retrieve result but failed: <src> %s\n<code_obj> %s\n<results> %s",
+                           src, code_obj, results)
 
         return code_obj, result
 
@@ -828,4 +841,5 @@ def register():
     directives.register_directive('ipython', IPythonDirective)
     directives.register_directive('ihaskell', IHaskellDirective)
     signals.article_generator_preread.connect(pre_read)
+    signals.article_generator_context.connect(post_context)
     signals.initialized.connect(sage_init)
