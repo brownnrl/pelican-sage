@@ -545,6 +545,7 @@ class SageDirective(CodeBlock):
                    'suppress-images': directives.flag,
                    'suppress-streams': directives.flag,
                    'suppress-errors': directives.flag,
+                   'result-order': int,
                    'latex': directives.flag
                    }
 
@@ -586,6 +587,17 @@ class SageDirective(CodeBlock):
             transformed_node = tr_table[result.type](code_id, result, order)
             if transformed_node is not None:
                 transformed_nodes.append(transformed_node)
+
+        if 'result-order' in self.options:
+            result_order = self.options['result-order']
+
+            try:
+                result = transformed_nodes[result_order]
+                transformed_nodes = [result]
+            except IndexError:
+                logger.error("No result of order %s for code block in src %s", result_order, self._get_source())
+                return []
+
         return transformed_nodes
 
     def _get_source(self):
@@ -651,7 +663,7 @@ class SageDirective(CodeBlock):
             outer = nodes.container('',
                                     nodes.raw('',
                                               "<div class='watermark'>[in %s] %s</div>" %
-                                              (code_obj.order + 1,_mod_format_permalinks(code_obj)),
+                                              (code_obj.order + 1, _mod_format_permalinks(code_obj)),
                                               format='html'),
                                     classes=['code_block', 'in_block'])
             outer += return_nodes[0]
@@ -760,7 +772,7 @@ class SageResultMixin(object):
 
 
 class IPythonNotebook(SageDirective, SageResultMixin):
-    option_spec = dict(list(SageDirective.option_spec.items()) + [('order', str)])
+    option_spec = dict(list(SageDirective.option_spec.items()) + [('cell-order', str)])
 
     def _create_codeblock(self):
 
@@ -771,10 +783,10 @@ class IPythonNotebook(SageDirective, SageResultMixin):
 
         src = self._get_file_reference(self.arguments[0], make_abs=True)
 
-        if 'order' not in self.options:
+        if 'cell-order' not in self.options:
             raise Exception("You must provide an order to select the correct cell in ", self.arguments[0])
 
-        code_obj = _FILE_MANAGER.get_code(user_id=self.options['order'], src=src)
+        code_obj = _FILE_MANAGER.get_code(user_id=self.options['cell-order'], src=src)
 
         if code_obj is None:
             logger.error("Can not find code block with data\n%s\n%s", self.options['order'], src)
