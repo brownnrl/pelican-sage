@@ -130,18 +130,75 @@ class CellWorker(Thread):
 
         return results
 
+def process_ipynb_code_results(manager, src, language, platform, cell, cell_order, nbformat):
+    if 'cell_type' not in cell or cell['cell_type'] != 'code':
+        return False
+
+    code_block = ''.join(cell['input' if nbformat == 3 else 'source'])
+    user_id = cell_order
+
+    code_obj = manager.create_code(code=code_block,
+                                   src=src,
+                                   order=cell_order,
+                                   language=language,
+                                   platform=platform,
+                                   user_id=user_id)
+
+    if code_obj.last_evaluated is None:
+        manager.timestamp_code(code_obj.id)
+    else:
+        return True
+
+    results = []
+
+    for output in cell['outputs']:
+        if 'display_data' != output['output_type']:
+            return True
+
+        include_text = 'html' not in output and 'png' not in output
+
+        if 'text' in output and include_text:
+            results.append(CR(ResultTypes.Stream,
+                              len(results),
+                              ''.join(output['text']),
+                              'text/plain'))
+
+        if 'html' in output:
+            results.append(CR(ResultTypes.Stream,
+                              len(results),
+                              ''.join(output['html']),
+                              'text/html'))
+
+        if 'png' in output:
+            results.append(CR(ResultTypes.Stream,
+                              len(results),
+                              output['png'],
+                              'image/png'))
+
+    combined_results = combine_results(results)
+
+    for result in combined_results:
+        manager.create_result(code_obj.id,
+                              result.data,
+                              result.order,
+                              result.mimetype)
+
+    return True
 
 def process_ipynb(manager, path, content_path, output_path):
     try:
         content = open(path, 'r').read()
         content = json.loads(content)
+        nbformat = 3
         language = ''
         platform = 'ipynb'
 
         language = content.get('metadata', {}) \
                        .get('language', None) or 'python'
 
-        if content['nbformat'] != 3:
+        if content['nbformat'] == 4:
+            nbformat = 4
+        elif content['nbformat'] != 3:
             raise Exception("Unsupported nbformat " + str(content['nbformat']))
 
         src = path.replace(content_path, '')
@@ -159,62 +216,35 @@ def process_ipynb(manager, path, content_path, output_path):
         shutil.copyfile(path, src_output)
 
         cell_order = 0
-        for worksheet in content['worksheets']:
-            for cell in worksheet['cells']:
-                if 'cell_type' not in cell or cell['cell_type'] != 'code':
-                    continue
+        any_processed = False
+        if nbformat == 3:
+            for worksheet in content['worksheets']:
+                for cell in worksheet['cells']:
+                    cell_processed = process_ipynb_code_results(manager,
+                                                              src,
+                                                              language,
+                                                              platform,
+                                                              cell,
+                                                              cell_order,
+                                                              nbformat)
+                    if cell_processed:
+                        any_processed = True
+                        cell_order += 1
+        else:
+            for cell in content['cells']:
+                cell_processed = process_ipynb_code_results(manager,
+                                                            src,
+                                                            language,
+                                                            platform,
+                                                            cell,
+                                                            cell_order,
+                                                            nbformat)
+                if cell_processed:
+                    any_processed = True
+                    cell_order += 1
 
-                code_block = ''.join(cell['input'])
-                user_id = cell_order
-
-                code_obj = manager.create_code(code=code_block,
-                                               src=src,
-                                               order=cell_order,
-                                               language=language,
-                                               platform=platform,
-                                               user_id=user_id)
-
-                cell_order += 1
-
-                if code_obj.last_evaluated is None:
-                    manager.timestamp_code(code_obj.id)
-                else:
-                    continue
-
-                results = []
-
-                for output in cell['outputs']:
-                    if 'display_data' != output['output_type']:
-                        continue
-
-                    include_text = 'html' not in output and 'png' not in output
-
-                    if 'text' in output and include_text:
-                        results.append(CR(ResultTypes.Stream,
-                                          len(results),
-                                          ''.join(output['text']),
-                                          'text/plain'))
-
-                    if 'html' in output:
-                        results.append(CR(ResultTypes.Stream,
-                                          len(results),
-                                          ''.join(output['html']),
-                                          'text/html'))
-
-                    if 'png' in output:
-                        results.append(CR(ResultTypes.Stream,
-                                          len(results),
-                                          output['png'],
-                                          'image/png'))
-
-                combined_results = combine_results(results)
-
-                for result in combined_results:
-                    manager.create_result(code_obj.id,
-                                          result.data,
-                                          result.order,
-                                          result.mimetype)
-        manager.commit()
+        if any_processed:
+            manager.commit()
 
     except:
         logger.exception('Could not process {} ipython notebook.'.format(path))
