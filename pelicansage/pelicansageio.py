@@ -5,6 +5,7 @@
 
 import os, sys
 import errno
+from urllib.error import HTTPError
 
 import requests
 from datetime import datetime
@@ -15,8 +16,12 @@ try:
     import urllib.request
     Request = urllib.request.Request
     def _grab_file(url, file_name):
-        with urllib.request.urlopen(url) as response, open(file_name, 'wb') as out_file:
-           shutil.copyfileobj(response, out_file)
+        try:
+            req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as response, open(file_name, 'wb') as out_file:
+               shutil.copyfileobj(response, out_file)
+        except HTTPError as e:
+            raise Exception("Could not process url " + str(url)) from e
     def get_response(req):
         return urllib.request.urlopen(req).read().decode('utf8')
 except ImportError:
