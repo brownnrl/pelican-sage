@@ -1,32 +1,32 @@
 from __future__ import unicode_literals, print_function
 
+import errno
+import json
+import logging
+import os
+import re
+import timeit
 from collections import defaultdict
-from docutils import nodes
-from docutils.parsers.rst import directives, Directive
-from docutils.parsers.rst.directives.images import Image
-from docutils.parsers.rst.directives.body import CodeBlock
-from .sagecell import SageCell, IPythonNotebookClient, ResultTypes
-from .managefiles import FileManager, EvaluationType, LanguagesStrEnum
-
 from queue import Queue, Empty
 from threading import Thread
+from binascii import b2a_base64
 
-from .util import CellResult as CR, combine_results
-
+import nbformat as notebookformat
+from docutils import nodes
+from docutils.parsers.rst import directives, Directive
+from docutils.parsers.rst.directives.body import CodeBlock
+from docutils.parsers.rst.directives.images import Image
+from nbconvert import HTMLExporter
+from nbconvert.preprocessors import ExtractOutputPreprocessor
 from pelican import signals
-from pelican.readers import RstReader, BaseReader
-from uuid import uuid4
+from pelican.readers import RstReader
+from traitlets import Set
+from traitlets.config import Config
 
-import pprint
-
-import os, shutil, errno
+from .managefiles import FileManager, LanguagesStrEnum
 from .pelicansageio import create_directory_tree
-
-import timeit
-
-import json
-
-import logging
+from .sagecell import SageCell, IPythonNotebookClient, ResultTypes
+from .util import CellResult as CR, combine_results
 
 logger = logging.getLogger(__name__)
 from traceback import format_exc
@@ -43,6 +43,33 @@ _SAGE_SETTINGS = {}
 _FILE_MANAGER = None
 
 _last_dole = 0
+
+BASE_USER_ID_COMMENT = r'\s*id\s*:\s*(.*)$'
+SCALA_USER_ID_COMMENT = re.compile(r'\s*//' + BASE_USER_ID_COMMENT)
+HASKELL_USER_ID_COMMENT = re.compile(r'\s*--' + BASE_USER_ID_COMMENT)
+PYTHON_USER_ID_COMMENT = re.compile(r'\s*#' + BASE_USER_ID_COMMENT)
+
+re_comment_id_map = {'haskell': HASKELL_USER_ID_COMMENT,
+                     'python': PYTHON_USER_ID_COMMENT,
+                     'scala': SCALA_USER_ID_COMMENT}
+
+c = Config()
+c.HTMLExporter.preprocessors = ['pelicansage.pelicansage.ExtractAllOutputPreprocessor']
+
+
+class ExtractAllOutputPreprocessor(ExtractOutputPreprocessor):
+    extract_output_types = Set(
+        {'image/png',
+         'image/jpeg',
+         'image/svg+xml',
+         'application/pdf',
+         'text/html',
+         'text/plain'}
+    ).tag(config=True)
+
+
+# create the new exporter using the custom config
+html_ipynb_output_exporter = HTMLExporter(config=c)
 
 
 def dole_out():
@@ -130,12 +157,85 @@ class CellWorker(Thread):
 
         return results
 
-def process_ipynb_code_results(manager, src, language, platform, cell, cell_order, nbformat):
+
+def process_ipynb_user_id(language, code_block_lines):
+    if len(code_block_lines) > 0 and language.lower() in ('haskell', 'scala', 'python'):
+        # scan to the first non-empty line
+        match = re_comment_id_map[language].match(code_block_lines[0])
+
+        if match:
+            user_id = match.groups(1)[0]
+            logger.error("USER_ID : %s", user_id)
+            return user_id
+    return None
+
+
+def split_output_name(output_name):
+    split = output_name.split('_')
+    split = split[1:-1] + split[-1].split('.')
+    return int(split[0]), int(split[1]), split[2]
+
+
+def process_ipynb_output_results(cell_order, outputs):
+    keys = list(outputs.keys())
+    results = []
+    for k in keys[:]:
+        # cell order, result order, type
+        c, r, t = split_output_name(k)
+        if c == cell_order:
+            results.append((r, t, outputs[k]))
+
+    dict_results = defaultdict(dict)
+    for r, t, o in results:
+        dict_results[r][t] = o
+
+    results = []
+    for r, ts in dict_results.items():
+        if 'htm' in ts:
+            results.append(CR(ResultTypes.Stream,
+                              r,
+                              ts['htm'].decode('UTF-8'),
+                              'text/html'))
+        elif 'png' in ts:
+            results.append(CR(ResultTypes.Stream,
+                              r,
+                              b2a_base64(ts['png']),
+                              'image/png'))
+        elif 'jpg' in ts:
+            results.append(CR(ResultTypes.Stream,
+                              r,
+                              b2a_base64(ts['jpg']),
+                              'image/jpg'))
+        elif 'ksh' in ts:
+            results.append(CR(ResultTypes.Stream,
+                              r,
+                              ts['ksh'].decode('UTF-8'),
+                              'text/plain'))
+        elif 'txt' in ts:
+            results.append(CR(ResultTypes.Stream,
+                              r,
+                              ts['txt'].decode('UTF-8'),
+                              'text/plain'))
+        elif 'c' in ts:
+            results.append(CR(ResultTypes.Stream,
+                              r,
+                              ts['c'].decode('UTF-8'),
+                              'text/plain'))
+
+    return results
+
+
+def process_ipynb_code_results(manager, src, language, platform, cell, cell_order, nbformat, outputs):
     if 'cell_type' not in cell or cell['cell_type'] != 'code':
         return False
 
-    code_block = ''.join(cell['input' if nbformat == 3 else 'source'])
-    user_id = cell_order
+    code_block_lines = [l for l in cell['input' if nbformat == 3 else 'source'] if l.strip() != '']
+    user_id = process_ipynb_user_id(language, code_block_lines)
+    if user_id:
+        code_block = ''.join(code_block_lines[1:])
+    else:
+        code_block = ''.join(code_block_lines)
+        user_id = cell_order
 
     code_obj = manager.create_code(code=code_block,
                                    src=src,
@@ -149,32 +249,11 @@ def process_ipynb_code_results(manager, src, language, platform, cell, cell_orde
     else:
         return True
 
-    results = []
-
-    for output in cell['outputs']:
-        if 'display_data' != output['output_type']:
-            return True
-
-        include_text = 'html' not in output and 'png' not in output
-
-        if 'text' in output and include_text:
-            results.append(CR(ResultTypes.Stream,
-                              len(results),
-                              ''.join(output['text']),
-                              'text/plain'))
-
-        if 'html' in output:
-            results.append(CR(ResultTypes.Stream,
-                              len(results),
-                              ''.join(output['html']),
-                              'text/html'))
-
-        if 'png' in output:
-            results.append(CR(ResultTypes.Stream,
-                              len(results),
-                              output['png'],
-                              'image/png'))
-
+    # note the result outputs (param outputs) is of the format
+    # output_{cell_index}_{result index}.type => c / htm / png / jpg
+    # Let's just take htm over all other results, then png/jpg, then c
+    # Where we look for a result index in that order for each result
+    results = process_ipynb_output_results(cell_order, outputs)
     combined_results = combine_results(results)
 
     for result in combined_results:
@@ -185,21 +264,27 @@ def process_ipynb_code_results(manager, src, language, platform, cell, cell_orde
 
     return True
 
+
 def process_ipynb(manager, path, content_path, output_path):
     try:
-        content = open(path, 'r').read()
-        content = json.loads(content)
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        json_content = json.loads(content)
         nbformat = 3
-        language = ''
         platform = 'ipynb'
 
-        language = content.get('metadata', {}) \
-                       .get('language', None) or 'python'
-
-        if content['nbformat'] == 4:
+        if json_content['nbformat'] == 4:
             nbformat = 4
-        elif content['nbformat'] != 3:
-            raise Exception("Unsupported nbformat " + str(content['nbformat']))
+        elif json_content['nbformat'] != 3:
+            raise Exception("Unsupported nbformat " + str(json_content['nbformat']))
+
+        language = 'python'
+        if nbformat == 3:
+            language = json_content.get('metadata', {}).get('language', None) or 'python'
+        elif nbformat == 4:
+            language = json_content.get('metadata', {}) \
+                           .get('language_info', {}) \
+                           .get('name', '').lower() or 'python'
 
         src = path.replace(content_path, '')
 
@@ -213,35 +298,42 @@ def process_ipynb(manager, path, content_path, output_path):
             if exception.errno != errno.EEXIST:
                 raise
 
-        shutil.copyfile(path, src_output)
+        manager.io.copy_file(path, src_output)
+
+        notebook = notebookformat.reads(content, as_version=4)
+        _, outputs = html_ipynb_output_exporter.from_notebook_node(notebook)
+        outputs = outputs['outputs']
 
         cell_order = 0
         any_processed = False
         if nbformat == 3:
-            for worksheet in content['worksheets']:
+            for worksheet in json_content['worksheets']:
                 for cell in worksheet['cells']:
                     cell_processed = process_ipynb_code_results(manager,
-                                                              src,
-                                                              language,
-                                                              platform,
-                                                              cell,
-                                                              cell_order,
-                                                              nbformat)
+                                                                src,
+                                                                language,
+                                                                platform,
+                                                                cell,
+                                                                cell_order,
+                                                                nbformat,
+                                                                outputs)
                     if cell_processed:
                         any_processed = True
-                        cell_order += 1
+
+                    cell_order += 1
         else:
-            for cell in content['cells']:
+            for cell in json_content['cells']:
                 cell_processed = process_ipynb_code_results(manager,
                                                             src,
                                                             language,
                                                             platform,
                                                             cell,
                                                             cell_order,
-                                                            nbformat)
+                                                            nbformat,
+                                                            outputs)
                 if cell_processed:
                     any_processed = True
-                    cell_order += 1
+                cell_order += 1
 
         if any_processed:
             manager.commit()
@@ -262,10 +354,10 @@ def pre_read(generator):
     files = []
     for paths, excludes in ((t + '_PATHS', t + '_EXCLUDES') for t in ('ARTICLE', 'PAGE')):
         files.extend([process_file for process_file in
-             generator.get_files(
-                 generator.settings[paths],
-                 exclude=generator.settings[excludes],
-                 extensions=False)])
+                      generator.get_files(
+                          generator.settings[paths],
+                          exclude=generator.settings[excludes],
+                          extensions=False)])
 
     logger.debug("Files to process: %s", files)
     for f in files:
@@ -359,6 +451,7 @@ def pre_read(generator):
         path2 = join_path(reference.src2.src)
         _FILE_MANAGER.io.touch_file(path1)
         _FILE_MANAGER.io.touch_file(path2)
+
 
 def post_context(*args, **kwargs):
     logger.info("<<<<<<POST CONTEXT>>>>>>: %s , %s", args, kwargs)
@@ -813,13 +906,15 @@ class IPythonNotebook(SageDirective, SageResultMixin):
 
         src = self._get_file_reference(self.arguments[0], make_abs=True)
 
-        if 'cell-order' not in self.options:
-            raise Exception("You must provide an order to select the correct cell in ", self.arguments[0])
+        if 'id' not in self.options and 'cell-order' not in self.options:
+            raise Exception("You must provide an id or order to select the correct cell in ", self.arguments[0])
 
-        code_obj = _FILE_MANAGER.get_code(user_id=self.options['cell-order'], src=src)
+        user_id = self.options['id'] if 'id' in self.options else self.options['cell-order']
+
+        code_obj = _FILE_MANAGER.get_code(user_id=user_id, src=src)
 
         if code_obj is None:
-            logger.error("Can not find code block with data\n%s\n%s", self.options['order'], src)
+            logger.error("Can not find code block with data\n%s\n%s", user_id, src)
             raise Exception("Can not find associated code block.")
 
         self.content = code_obj.content.split('\n')

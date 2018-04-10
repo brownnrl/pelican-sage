@@ -41,7 +41,7 @@ def combine_results(results):
                 accum = ''
 
             if cr.mimetype != accum_mimetype and cr.mimetype in accumulated_mimetypes:
-                accume_mime = cr.mimetype
+                accum_mimetype = cr.mimetype
                 accum += cr.data
                 if accum_mimetype == 'text/html':
                     accum += '<br/>'

@@ -1,3 +1,5 @@
+from sqlite3 import IntegrityError
+
 import sqlalchemy
 from sqlalchemy import Table, Column, Integer, String, ForeignKey, Enum
 from sqlalchemy.types import DateTime
@@ -26,7 +28,12 @@ MimeType = Enum('text/plain',
 
 LanguagesStrEnum = ('python',
                    'sage',
-                   'haskell',  
+                   'haskell',
+                   'scala',
+                   'java',
+                   'groovy',
+                   'kotlin',
+                   'clojure',
                    'r',
                    'octave',
                    'maxima',
@@ -35,7 +42,7 @@ LanguagesStrEnum = ('python',
 
 Platforms = Enum('sage', 'ipython', 'ihaskell', 'ipynb')
 
-FileTypes = Enum('rst', 'ipynb')
+FileTypes = Enum('rst', 'ipynb', 'json')
 
 Languages = Enum(*LanguagesStrEnum)
 
