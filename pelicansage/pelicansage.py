@@ -10,6 +10,7 @@ from collections import defaultdict
 from queue import Queue, Empty
 from threading import Thread
 from binascii import b2a_base64
+from uuid import uuid4
 
 import nbformat as notebookformat
 from docutils import nodes
@@ -473,7 +474,13 @@ class CodeBlockEvaluator(object):
             pr_table[result.result_type](code_id, result, order)
 
     def _process_image(self, code_id, image, order):
-        _file_id = self._manager.create_file(code_id, image.data, os.path.split(image.data)[1], order, image.mimetype)
+        file_name = image.data
+        if not file_name:
+            return
+        if '?' in file_name:
+            file_name = file_name[:file_name.find('?')]
+        file_name = os.path.split(file_name)[1]
+        _file_id = self._manager.create_file(code_id, image.data, file_name, order, image.mimetype)
 
     def _process_error(self, code_id, error, order):
         code_obj = self._manager.get_code(code_id)
