@@ -40,6 +40,11 @@ except ImportError:
         return urllib2.urlopen(req).read()
 
 
+def save_data_to_file(raw_data, file_name):
+    with open(file_name, 'wb') as f:
+        f.write(raw_data)
+
+
 def download_file(url, file_name):
     return _grab_file(url, file_name)
 

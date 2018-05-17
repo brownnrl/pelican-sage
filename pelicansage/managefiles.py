@@ -13,6 +13,8 @@ import zlib
 import base64
 import sys
 
+from uuid import uuid4
+
 class ResultTypes:
     Image, Stream, Error = range(3)
     ALL_STR = ('image', 'stream', 'error')
@@ -401,6 +403,27 @@ class FileManager(object):
             return []
 
         return code_obj.stream_results
+
+    def save_file(self, code_id, raw, file_name, order=None, mimetype=None):
+        file_location = None
+
+        if self._base_path is not None:
+            file_location_path = self.io.join(self._base_path, str(code_id))
+            self.io.create_directory_tree(file_location_path)
+            file_location = self.io.join(file_location_path, file_name)
+
+        self.io.save_data_to_file(raw, file_location)
+
+        file_result = FileResult(code_id=code_id,
+                                 file_name=file_name,
+                                 order=order,
+                                 mimetype=mimetype)
+
+        self._session.add(file_result)
+
+        self._session.flush()#self._session.commit()
+
+        return file_result
 
     def create_file(self, code_id, url, file_name, order=None, mimetype=None):
 

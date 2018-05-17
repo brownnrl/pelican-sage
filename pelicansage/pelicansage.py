@@ -198,14 +198,14 @@ def process_ipynb_output_results(cell_order, outputs):
                               ts['htm'].decode('UTF-8'),
                               'text/html'))
         elif 'png' in ts:
-            results.append(CR(ResultTypes.Stream,
+            results.append(CR(ResultTypes.Image,
                               r,
-                              b2a_base64(ts['png']),
+                              ts['png'],
                               'image/png'))
         elif 'jpg' in ts:
-            results.append(CR(ResultTypes.Stream,
+            results.append(CR(ResultTypes.Image,
                               r,
-                              b2a_base64(ts['jpg']),
+                              ts['jpg'],
                               'image/jpg'))
         elif 'ksh' in ts:
             results.append(CR(ResultTypes.Stream,
@@ -258,10 +258,23 @@ def process_ipynb_code_results(manager, src, language, platform, cell, cell_orde
     combined_results = combine_results(results)
 
     for result in combined_results:
-        manager.create_result(code_obj.id,
+        if result.result_type == ResultTypes.Image:
+            uuid = uuid4()
+            ext = 'dat'
+            if result.mimetype == 'image/png':
+                ext = 'png'
+            elif result.mimetype == 'image/jpg':
+                ext = 'jpg'
+            manager.save_file(code_obj.id,
                               result.data,
+                              '{}_{}.{}'.format(result.order, uuid, ext),
                               result.order,
                               result.mimetype)
+        else:
+            manager.create_result(code_obj.id,
+                                  result.data,
+                                  result.order,
+                                  result.mimetype)
 
     return True
 
