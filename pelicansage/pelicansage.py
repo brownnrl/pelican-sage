@@ -222,6 +222,13 @@ def process_ipynb_output_results(cell_order, outputs):
                               r,
                               ts['c'].decode('UTF-8'),
                               'text/plain'))
+        elif 'bat' in ts:
+            results.append(CR(ResultTypes.Stream,
+                              r,
+                              ts['bat'].decode('UTF-8'),
+                              'text/plain'))
+        else:
+            logger.error("Unknown result type %s\n%s", repr(ts)[:40], repr(r)[:40])
 
     return results
 
@@ -271,6 +278,11 @@ def process_ipynb_code_results(manager, src, language, platform, cell, cell_orde
                               result.order,
                               result.mimetype)
         else:
+            logger.debug("creating result for %s <%s, %s>: %s",
+                         code_obj.id,
+                         result.order,
+                         result.mimetype,
+                         str(result.data)[0:50])
             manager.create_result(code_obj.id,
                                   result.data,
                                   result.order,

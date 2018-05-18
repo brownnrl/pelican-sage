@@ -1,0 +1,5 @@
+markdown>=2.6
+nbconvert>=5.3
+nbformat>=4.4
+requests>=2.18
+websocket-client>=0.47
