@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime
 
-from pelicansage.pelicansage import process_ipynb
+from pelicansage.notebook import process_ipynb
 from pelicansage.managefiles import FileManager
 
 import os as pyos
