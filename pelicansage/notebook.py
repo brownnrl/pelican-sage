@@ -246,7 +246,6 @@ def process_ipynb_user_id(language, code_block_lines):
 
         if match:
             user_id = match.groups(1)[0]
-            logger.error("USER_ID : %s", user_id)
             return user_id
     return None
 

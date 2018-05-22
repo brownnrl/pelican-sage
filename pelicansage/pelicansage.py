@@ -18,6 +18,7 @@ from pelicansage.notebook import process_ipynb
 from .managefiles import FileManager, LanguagesStrEnum
 from .pelicansageio import create_directory_tree
 from .sagecell import SageCell, IPythonNotebookClient, ResultTypes
+from pelicansage.slides import SlidesGenerator
 
 logger = logging.getLogger(__name__)
 from traceback import format_exc
@@ -759,7 +760,14 @@ class SageImage(SageResultMixin, Image):
         return [_mod_transform_image(code_obj.id, super(SageImage, self).run()[0], result.order)]
 
 
+def add_generator(pelican_object):
+    logger.error("ADDING PELICAN GENERATOR!!!")
+    return SlidesGenerator
+
+
 def register():
+    logger.error("CONNECT PELICAN GENERATOR!!")
+    signals.get_generators.connect(add_generator)
     directives.register_directive('sage', SageDirective)
     directives.register_directive('sage-image', SageImage)
     directives.register_directive('sage-result', SageResult)
