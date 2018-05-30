@@ -48,7 +48,7 @@ class SlidesGenerator(CachingGenerator):
                              css=None,
                              js=None,
                              auto_console=False,
-                             slide_numbers=True,
+                             slide_numbers=False,
                              skip_help=False,
                              skip_notes=False,
                              mathjax=os.environ.get('HOVERCRAFT_MATHJAX', mathjax_cdn))
