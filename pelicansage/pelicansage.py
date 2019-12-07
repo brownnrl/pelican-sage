@@ -17,7 +17,7 @@ from pelican.readers import RstReader
 from pelicansage.notebook import process_ipynb
 from .managefiles import FileManager, LanguagesStrEnum
 from .pelicansageio import create_directory_tree
-from .sagecell import SageCell, IPythonNotebookClient, ResultTypes
+from .managefiles import ResultTypes
 from pelicansage.slides import SlidesGenerator
 
 logger = logging.getLogger(__name__)
@@ -48,20 +48,8 @@ def dole_out():
     return next_cell
 
 
-def create_cells():
-    cells = {'sage': SageCell(dole_out())}
-
-    if _SAGE_SETTINGS['IHASKELL_URL']:
-        cells['ihaskell'] = IPythonNotebookClient(_SAGE_SETTINGS['IHASKELL_URL'], timeout=60)
-
-    if _SAGE_SETTINGS['IPYTHON_URL']:
-        cells['ipython'] = IPythonNotebookClient(_SAGE_SETTINGS['IPYTHON_URL'])
-
-    return cells
-
 
 # One sage cell instance per source file.
-_SAGE_CELL_INSTANCES = defaultdict(create_cells)
 
 _CONTENT_PATH = None
 
@@ -164,35 +152,6 @@ def pre_read(generator):
     _PREPROCESSING_DONE = True
     SageDirective.reset_src_order()
 
-    # We now have all code blocks in our database, and have to evaluate
-    # them.
-    unevaled_blocks, references = _FILE_MANAGER.get_unevaluated_codeblocks()
-
-    threads = []
-    unique_srcs = set()
-    result_queue = Queue()
-
-    for blocks in unevaled_blocks:
-        if len(blocks) == 0:
-            continue
-        src = blocks[0].src.src
-        unique_srcs.add(src)
-        cell = _SAGE_CELL_INSTANCES[src]
-        threads.append(CellWorker(result_queue, blocks, cell))
-
-    start_time = timeit.default_timer()
-    for thread in threads:
-        thread.start()
-
-    for thread in threads:
-        thread.join()
-
-    logger.info("Results fetched in %.2f seconds.", timeit.default_timer() - start_time)
-
-    for cells in _SAGE_CELL_INSTANCES.values():
-        for cell in cells.values():
-            cell.cleanup()
-
     # write out raw text snippets
     blks = _FILE_MANAGER.get_all_codeblocks()
     raw_base_path = os.path.join(generator.settings['OUTPUT_PATH'], 'raw/')
@@ -203,88 +162,14 @@ def pre_read(generator):
         with open(raw_path, 'w') as f:
             f.write(blk.content)
 
-    try:
-        evaluator = CodeBlockEvaluator(_FILE_MANAGER)
-        while True:
-            # todo: add logging statements
-            src, src_results = result_queue.get_nowait()
-            for block_id, block_results in src_results:
-                evaluator.process_results(block_id, block_results)
-
-    except Empty:
-        pass
-
-    for src in unique_srcs:
-        _FILE_MANAGER.compute_permalink(src)
-
-    # We are done processing results, commit them to disk
-    _FILE_MANAGER.commit()
-
-    logger.info("Results downloaded and commited in %.2f seconds.", timeit.default_timer() - start_time)
-
-    # Find all references which are
-    # Preprocessing done
-
-    def join_path(path):
-        if path.startswith('/'):
-            path = path[1:]
-        return os.path.abspath(os.path.join(_CONTENT_PATH, path))
-
-    for reference in references:
-        path1 = join_path(reference.src1.src)
-        path2 = join_path(reference.src2.src)
-        _FILE_MANAGER.io.touch_file(path1)
-        _FILE_MANAGER.io.touch_file(path2)
-
 
 def post_context(*args, **kwargs):
     logger.info("<<<<<<POST CONTEXT>>>>>>: %s , %s", args, kwargs)
     SageDirective.reset_src_order()
 
 
-class CodeBlockEvaluator(object):
-    def __init__(self, manager):
-        self._manager = manager
-
-    def process_results(self, code_id, results):
-        num_names = [(x, y) for x, y in zip(ResultTypes.ALL_NUM, ResultTypes.ALL_STR)]
-
-        pr_table = dict([(x, getattr(self, '_process_%s' % y)) for x, y in num_names])
-
-        self._manager.timestamp_code(code_id)
-
-        for order, result in enumerate(results):
-            pr_table[result.result_type](code_id, result, order)
-
-    def _process_image(self, code_id, image, order):
-        file_name = image.data
-        if not file_name:
-            return
-        if '?' in file_name:
-            file_name = file_name[:file_name.find('?')]
-        file_name = os.path.split(file_name)[1]
-        _file_id = self._manager.create_file(code_id, image.data, file_name, order, image.mimetype)
-
-    def _process_error(self, code_id, error, order):
-        code_obj = self._manager.get_code(code_id)
-        logger.warning("Code order #%s %sin source file %s generated exception.\n%s\n[...]\n%s", code_obj.order,
-                       "(user_id %s) " % (code_obj.user_id,) if code_obj.user_id else "",
-                       code_obj.src.src,
-                       code_obj.content[0:80],
-                       error.data.evalue)
-        self._manager.create_error(code_id,
-                                   error.data.ename,
-                                   error.data.evalue,
-                                   error.data.traceback,
-                                   order)
-
-    def _process_stream(self, code_id, stream, order):
-        self._manager.create_result(code_id, stream.data, order, stream.mimetype)
-
-
 def sage_init(pelicanobj):
     global _FILE_MANAGER
-    global _SAGE_CELL_INSTANCES
 
     try:
         settings = pelicanobj.settings['SAGE']
@@ -307,8 +192,6 @@ def process_settings(pelicanobj, settings):
     global _CONTENT_PATH
 
     # Default settings
-    _SAGE_SETTINGS['CELL_URL'] = ['http://sagecell.sagemath.org']
-    _SAGE_SETTINGS['PUBLIC_CELL'] = 'http://sagecell.sagemath.org'
     _SAGE_SETTINGS['FILE_BASE_PATH'] = os.path.join(pelicanobj.settings['OUTPUT_PATH'], 'images/sage')
     _SAGE_SETTINGS['OUTPUT_PATH'] = pelicanobj.settings['OUTPUT_PATH']
     _SAGE_SETTINGS['DB_PATH'] = ':memory:'
@@ -325,8 +208,6 @@ def process_settings(pelicanobj, settings):
         return x
 
     if settings is not None:
-        md('CELL_URL')
-        md('PUBLIC_CELL')
         md('FILE_BASE_PATH')
         md('DB_PATH', transform_content_db)
         md('IPYTHON_URL')
@@ -766,14 +647,8 @@ def add_generator(pelican_object):
 
 
 def register():
-    logger.error("CONNECT PELICAN GENERATOR!!")
     signals.get_generators.connect(add_generator)
-    directives.register_directive('sage', SageDirective)
-    directives.register_directive('sage-image', SageImage)
-    directives.register_directive('sage-result', SageResult)
-    directives.register_directive('ipynb', IPythonNotebook)
-    directives.register_directive('ipython', IPythonDirective)
-    directives.register_directive('ihaskell', IHaskellDirective)
+    directives.register_directive('notebook', IPythonNotebook)
     signals.article_generator_preread.connect(pre_read)
     signals.article_generator_context.connect(post_context)
     signals.initialized.connect(sage_init)
